@@ -27,5 +27,5 @@ This project uses `uv` for extremely fast and reproducible dependency management
 4. Run the training script:
 
    ```bash
-   uv run main.py
+   uv run data_loader.py
    ```
