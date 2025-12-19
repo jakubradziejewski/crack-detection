@@ -60,20 +60,9 @@ class GradCAMPlusPlus(nn.Module):
         return cam
 
 # ============= PSEUDO LABEL GENERATION =============
-def generate_pseudo_labels(model, img_paths, device, confidence_threshold=0.7, cam_percentile=70):
-    """
-    Generate pseudo labels with confidence-based filtering
-    
-    Args:
-        model: Trained classifier model
-        img_paths: List of image paths
-        device: Device to run on
-        confidence_threshold: Minimum softmax confidence to consider as crack (0-1)
-        cam_percentile: Percentile threshold for CAM (higher = more precise, 50-90 recommended)
-    """
+def generate_pseudo_labels(model, img_paths, device):
     model.eval()
     pseudo_masks = []
-    skipped_count = 0
     
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -81,32 +70,18 @@ def generate_pseudo_labels(model, img_paths, device, confidence_threshold=0.7, c
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     
-    print(f"Generating pseudo labels (confidence_threshold={confidence_threshold}, cam_percentile={cam_percentile})...")
-    
+    print("Generating pseudo labels from Grad-CAM++...")
     for path in tqdm(img_paths):
-        # Explicit non-crack images
         if 'noncrack' in os.path.basename(path).lower():
             mask = np.zeros((224, 224), dtype=np.uint8)
-            pseudo_masks.append(mask)
-            continue
-            
-        img = Image.open(path).convert('RGB')
-        img_t = transform(img).unsqueeze(0).to(device)
-        img_t.requires_grad = True
-        
-        # Forward pass
-        output = model(img_t, return_cam=True)
-        
-        # Check confidence with softmax
-        with torch.no_grad():
-            probs = F.softmax(output, dim=1)
-            crack_confidence = probs[0, 1].item()
-        
-        # If confidence is low, treat as non-crack
-        if crack_confidence < confidence_threshold:
-            mask = np.zeros((224, 224), dtype=np.uint8)
-            skipped_count += 1
         else:
+            img = Image.open(path).convert('RGB')
+            img_t = transform(img).unsqueeze(0).to(device)
+            img_t.requires_grad = True
+            
+            # Forward pass
+            output = model(img_t, return_cam=True)
+            
             # Backward pass for class 1 (crack)
             model.zero_grad()
             class_score = output[:, 1]
@@ -120,18 +95,12 @@ def generate_pseudo_labels(model, img_paths, device, confidence_threshold=0.7, c
             cam = cv2.resize(cam, (224, 224))
             cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
             
-            # Higher percentile = more conservative/precise segmentation
-            threshold = np.percentile(cam, cam_percentile)
+            # Threshold at 50th percentile for initial pseudo labels
+            threshold = np.percentile(cam, 50)
             mask = (cam > threshold).astype(np.uint8) * 255
-            
-            # Post-processing: Remove small isolated regions
-            kernel = np.ones((3, 3), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         pseudo_masks.append(mask)
     
-    print(f"Generated {len(pseudo_masks)} pseudo labels ({skipped_count} below confidence threshold)")
     return pseudo_masks
 
 # ============= SEGMENTATION MODEL =============
@@ -228,7 +197,7 @@ class CrackSegDataset(Dataset):
         return img
 
 # ============= TRAINING =============
-def train_classifier(img_paths, epochs=5):
+def train_classifier(img_paths):
     """Stage 1: Train image classifier"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -237,8 +206,6 @@ def train_classifier(img_paths, epochs=5):
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
@@ -251,14 +218,13 @@ def train_classifier(img_paths, epochs=5):
     criterion = nn.CrossEntropyLoss()
     
     print("Stage 1: Training classifier for CAM...")
-    best_acc = 0
-    for epoch in range(epochs):
-        model.train()
+    model.train()
+    for epoch in range(2):
         total_loss = 0
         correct = 0
         total = 0
         
-        for imgs, lbls in tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}"):
+        for imgs, lbls in tqdm(loader, desc=f"Epoch {epoch+1}"):
             imgs, lbls = imgs.to(device), lbls.to(device)
             
             optimizer.zero_grad()
@@ -274,15 +240,10 @@ def train_classifier(img_paths, epochs=5):
         
         acc = 100. * correct / total
         print(f"Epoch {epoch+1}, Loss: {total_loss/len(loader):.4f}, Acc: {acc:.2f}%")
-        
-        if acc > best_acc:
-            best_acc = acc
-            torch.save(model.state_dict(), 'classifier_best.pth')
     
-    print(f"Best classifier accuracy: {best_acc:.2f}%")
     return model
 
-def train_segmentation_model(img_paths, pseudo_masks, epochs=10):
+def train_segmentation_model(img_paths, pseudo_masks):
     """Stage 2: Train segmentation model"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -300,11 +261,10 @@ def train_segmentation_model(img_paths, pseudo_masks, epochs=10):
     criterion = nn.BCELoss()
     
     print("\nStage 2: Training segmentation model...")
-    best_loss = float('inf')
-    for epoch in range(epochs):
-        model.train()
+    model.train()
+    for epoch in range(2):
         total_loss = 0
-        for imgs, masks in tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}"):
+        for imgs, masks in tqdm(loader, desc=f"Epoch {epoch+1}"):
             imgs, masks = imgs.to(device), masks.to(device)
             
             optimizer.zero_grad()
@@ -315,58 +275,175 @@ def train_segmentation_model(img_paths, pseudo_masks, epochs=10):
             
             total_loss += loss.item()
         
-        avg_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
-        
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save(model.state_dict(), 'crack_seg_model.pth')
+        print(f"Epoch {epoch+1}, Loss: {total_loss/len(loader):.4f}")
     
-    print(f"Best segmentation loss: {best_loss:.4f}")
+    torch.save(model.state_dict(), 'crack_seg_model.pth')
     return model
 
-def train_model(confidence_threshold=0.7, cam_percentile=70, classifier_epochs=3, seg_epochs=3):
-    """
-    Full training pipeline with adjustable parameters
-    
-    Args:
-        confidence_threshold: Classification confidence threshold (0-1, higher = more strict)
-        cam_percentile: CAM activation percentile (50-90, higher = more precise localization)
-        classifier_epochs: Number of epochs for classifier training
-        seg_epochs: Number of epochs for segmentation training
-    """
+def train_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     img_paths = sorted(glob.glob('./data/train/images/*.jpg'))
     
-    print(f"Training with confidence_threshold={confidence_threshold}, cam_percentile={cam_percentile}")
-    
     # Stage 1: Train classifier
-    classifier = train_classifier(img_paths, epochs=classifier_epochs)
+    classifier = train_classifier(img_paths)
     
-    # Stage 2: Generate pseudo labels with thresholds
-    pseudo_masks = generate_pseudo_labels(
-        classifier, img_paths, device, 
-        confidence_threshold=confidence_threshold,
-        cam_percentile=cam_percentile
-    )
+    # Stage 2: Generate pseudo labels
+    pseudo_masks = generate_pseudo_labels(classifier, img_paths, device)
     
     # Stage 3: Train segmentation
-    model = train_segmentation_model(img_paths, pseudo_masks, epochs=seg_epochs)
+    model = train_segmentation_model(img_paths, pseudo_masks)
     
     return model
 
+# ============= METRICS & VISUALIZATION =============
+
+def calculate_iou(pred_mask, true_mask):
+    intersection = np.logical_and(pred_mask, true_mask).sum()
+    union = np.logical_or(pred_mask, true_mask).sum()
+    return intersection / union if union > 0 else (1.0 if intersection == 0 else 0.0)
+
+def evaluate_test_set(model_path='crack_seg_model.pth'):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = UNetLight().to(device)
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    test_imgs = sorted(glob.glob('./data/test/images/*.jpg'))
+    test_masks = sorted(glob.glob('./data/test/masks/*.jpg'))
+    
+    ious = []
+    
+    print("\nEvaluating on test set...")
+    for img_path, mask_path in tqdm(zip(test_imgs, test_masks), total=len(test_imgs)):
+        img = Image.open(img_path).convert('RGB')
+        true_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        original_size = true_mask.shape
+        
+        img_t = transform(img).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            pred = model(img_t).squeeze().cpu().numpy()
+        
+        pred = cv2.resize(pred, (original_size[1], original_size[0]))
+        pred_binary = (pred > 0.5).astype(np.uint8)
+        true_binary = (true_mask > 127).astype(np.uint8)
+        
+        iou = calculate_iou(pred_binary, true_binary)
+        ious.append(iou)
+    
+    mean_iou = np.mean(ious)
+    print(f"\nTest Set Mean IoU: {mean_iou:.4f}")
+    return mean_iou, ious
+
+def visualize_results(model_path='crack_seg_model.pth', num_samples=5):
+    import matplotlib.pyplot as plt
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = UNetLight().to(device)
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    test_imgs = sorted(glob.glob('./data/test/images/*.jpg'))
+    test_masks = sorted(glob.glob('./data/test/masks/*.jpg'))
+    
+    indices = np.random.choice(len(test_imgs), num_samples, replace=False)
+    
+    fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4*num_samples))
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+    
+    for i, idx in enumerate(indices):
+        img_path = test_imgs[idx]
+        mask_path = test_masks[idx]
+        
+        img = Image.open(img_path).convert('RGB')
+        true_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        original_size = true_mask.shape
+        
+        img_t = transform(img).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            pred = model(img_t).squeeze().cpu().numpy()
+        
+        pred = cv2.resize(pred, (original_size[1], original_size[0]))
+        pred_binary = (pred > 0.5).astype(np.uint8) * 255
+        
+        iou = calculate_iou(pred_binary > 127, true_mask > 127)
+        
+        axes[i, 0].imshow(cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB))
+        axes[i, 0].set_title('Original Image')
+        axes[i, 0].axis('off')
+        
+        axes[i, 1].imshow(pred_binary, cmap='gray')
+        axes[i, 1].set_title(f'Predicted Mask\nIoU: {iou:.3f}')
+        axes[i, 1].axis('off')
+        
+        axes[i, 2].imshow(true_mask, cmap='gray')
+        axes[i, 2].set_title('Ground Truth')
+        axes[i, 2].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig('visualization.png', dpi=150, bbox_inches='tight')
+    plt.show()
+
+# ============= SUBMISSION =============
+def mask2rle(img):
+    pixels = img.T.flatten()
+    pixels = np.concatenate([[0], pixels, [0]])
+    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
+    runs[1::2] -= runs[::2]
+    return ' '.join(str(x) for x in runs)
+
+def generate_submission(model_path='crack_seg_model.pth'):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = UNetLight().to(device)
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    test_paths = sorted(glob.glob('./data/test/images/*.jpg'))
+    
+    print("\nGenerating submission...")
+    with open('submission.csv', 'w') as f:
+        f.write('ImageId,EncodedPixels\n')
+        
+        for path in tqdm(test_paths):
+            img = Image.open(path).convert('RGB')
+            original_size = img.size[::-1]
+            
+            img_t = transform(img).unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                pred = model(img_t).squeeze().cpu().numpy()
+            
+            pred = cv2.resize(pred, (original_size[1], original_size[0]))
+            binary_mask = (pred > 0.5).astype(np.uint8)
+            
+            rle = mask2rle(binary_mask)
+            img_id = os.path.basename(path).replace('.jpg', '')
+            f.write(f'{img_id},{rle}\n')
+    
+    print("Submission saved to submission.csv")
+
 if __name__ == '__main__':
-    # Adjust these parameters to control precision:
-    # - Higher confidence_threshold (e.g., 0.8, 0.9) = fewer false positives in classification
-    # - Higher cam_percentile (e.g., 75, 80) = more precise crack localization (smaller masks)
-    
-    model = train_model(
-        confidence_threshold=0.82,  # Increase to reduce false crack detections
-        cam_percentile=87,           # Increase to narrow down crack regions
-        classifier_epochs=3,
-        seg_epochs=4
-    )
-    
-    print("\nTraining complete! Models saved:")
-    print("- classifier_best.pth (classification model)")
-    print("- crack_seg_model.pth (segmentation model)")
+    model = train_model()
+    mean_iou, _ = evaluate_test_set()
+    visualize_results()
+    generate_submission()
