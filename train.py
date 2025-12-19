@@ -362,7 +362,7 @@ if __name__ == '__main__':
     
     model = train_model(
         confidence_threshold=0.82,  # Increase to reduce false crack detections
-        cam_percentile=87,           # Increase to narrow down crack regions
+        cam_percentile=88,           # Increase to narrow down crack regions
         classifier_epochs=3,
         seg_epochs=4
     )

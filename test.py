@@ -320,7 +320,7 @@ def find_best_threshold(model_path='crack_seg_model.pth', thresholds=None):
         thresholds: List of thresholds to test (default: 0.3 to 0.7)
     """
     if thresholds is None:
-        thresholds = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+        thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
     
     print("\nTesting multiple thresholds...")
     best_iou = 0
