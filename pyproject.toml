@@ -15,6 +15,7 @@ dependencies = [
     "torchvision>=0.15.0",
     "kagglehub>=0.3.13",
     "scikit-learn>=1.7.2",
+    "scikit-image>=0.25.2",
 ]
 
 # Define the custom repository for CUDA 11.8
