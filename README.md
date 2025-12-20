@@ -22,10 +22,10 @@ This project uses `uv` for extremely fast and reproducible dependency management
 3. Run the data setup/preprocessing script:
 
    ```bash
-   uv run setup.py
+   uv run src/setup.py
    ```
 4. Run the training script:
 
    ```bash
-   uv run data_loader.py
+   uv run src/train.py
    ```
