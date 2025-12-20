@@ -16,14 +16,14 @@ CONFIG = {
     "use_oversampling": True,
 
     # Training Hyperparameters
-    "classifier_epochs": 3,
-    "seg_epochs": 4,
+    "classifier_epochs": 4,
+    "seg_epochs": 5,
     "lr_classifier": 1e-4,
     "lr_seg": 1e-3,
 
     # Semi-Supervised Logic
-    "confidence_threshold": 0.5,  # Confidence to accept a pseudo-label
-    "cam_percentile": 98,          # Percentile for CAM thresholding
+    "confidence_threshold": 0.9,  # Confidence to accept a pseudo-label
+    "cam_percentile": 99,          # Percentile for CAM thresholding
 
     # Model Artifacts
     "cls_model_path": BASE_DIR / "classifier_best.pth",
@@ -31,5 +31,5 @@ CONFIG = {
     "submission_file": BASE_DIR / "submission.csv",
     
     # Testing
-    "test_thresholds": [0.1, 0.15, 0.2, 0.25, 0.3]
+    "test_thresholds": [0.02, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25, 0.3]
 }
