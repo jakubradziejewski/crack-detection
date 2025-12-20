@@ -167,9 +167,9 @@ def generate_pseudo_labels(model, img_paths, device, config):
             mask = (cam > threshold).astype(np.uint8) * 255
             
             # Optional: Cleanup morphology (commented out as per your code)
-            # kernel = np.ones((3, 3), np.uint8)
-            # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1) also this can be added
+            #kernel = np.ones((3, 3), np.uint8)
+            #mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            #mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         pseudo_masks.append(mask)
     

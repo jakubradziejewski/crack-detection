@@ -6,7 +6,7 @@ CONFIG = {
     "root_dir": BASE_DIR / "data",
     
     # Image Config 
-    "image_size": 448,  # Native resolution, no downsampling!
+    "image_size": 448,
     
     # Data Config
     "batch_size": 2, 
@@ -21,18 +21,14 @@ CONFIG = {
     "use_oversampling": True,
 
     # Training Hyperparameters
-    "classifier_epochs": 2,
-    "seg_epochs": 2,
+    "classifier_epochs": 1,
+    "seg_epochs": 1,
     "lr_classifier": 1e-4,
     "lr_seg": 1e-3,
 
     # Semi-Supervised Logic
-    "confidence_threshold": 0.6,
-    "cam_percentile": 90,  # Increased for thinner masks
-
-    # Threshold Search
-    "threshold_search_range": (0.01, 0.9),
-    "threshold_tolerance": 0.01,
+    "confidence_threshold": 0.7,
+    "cam_percentile": 95,
 
     # Model Artifacts
     "cls_model_path": BASE_DIR / "classifier_best.pth",
