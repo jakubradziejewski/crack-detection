@@ -6,70 +6,109 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 import glob
-import os
 from tqdm import tqdm
 
 from config import CONFIG
-from src.models import GradCAMPlusPlus, UNetLight
+from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import SimpleDataset, CrackSegDataset
-from src.utils import generate_pseudo_labels
-from src.evaluate import find_best_threshold, evaluate_test_set
+from src.metrics import find_best_threshold
 from src.visualize import visualize_results
 from src.submit import generate_submission
 
-def train_classifier(img_paths, device):
-    """Stage 1: Train Classifier"""
-    print(f"\n[Stage 1] Training Classifier for {CONFIG['classifier_epochs']} epochs...")
+# --- Generic Training Loop ---
+
+def train_model(model, loader, optimizer, criterion, device, epochs, description="Training"):
+    """
+    Generic training loop that can be used for both classifier and segmenter.
+    """
+    model.to(device)
+    best_loss = float('inf')
     
-    labels = [0 if 'noncrack' in os.path.basename(f).lower() else 1 for f in img_paths]
-    
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    
-    dataset = SimpleDataset(img_paths, labels, transform)
-    loader = DataLoader(dataset, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=CONFIG["num_workers"])
-    
-    model = GradCAMPlusPlus().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr_classifier"])
-    criterion = nn.CrossEntropyLoss()
-    
-    best_acc = 0
-    for epoch in range(CONFIG["classifier_epochs"]):
+    for epoch in range(epochs):
         model.train()
+        total_loss = 0
         correct = 0
         total = 0
         
-        for imgs, lbls in tqdm(loader, desc=f"Ep {epoch+1}"):
-            imgs, lbls = imgs.to(device), lbls.to(device)
+        for batch in tqdm(loader, desc=f"{description} Ep {epoch+1}"):
+            # Handle variable unpacking based on dataset type
+            if len(batch) == 2:
+                inputs, targets = batch
+                inputs, targets = inputs.to(device), targets.to(device)
+            else:
+                inputs = batch.to(device)
+                targets = None # Unsupervised case
+            
             optimizer.zero_grad()
-            outputs = model(imgs)
-            loss = criterion(outputs, lbls)
+            outputs = model(inputs)
+            
+            # Loss calculation
+            loss = criterion(outputs, targets)
             loss.backward()
             optimizer.step()
             
-            _, predicted = outputs.max(1)
-            total += lbls.size(0)
-            correct += predicted.eq(lbls).sum().item()
-        
-        acc = 100. * correct / total
-        print(f"Epoch {epoch+1} Acc: {acc:.2f}%")
-        
-        if acc > best_acc:
-            best_acc = acc
-            torch.save(model.state_dict(), CONFIG["cls_model_path"])
+            total_loss += loss.item()
             
-    print(f"Best Classifier Accuracy: {best_acc:.2f}%")
+            # Optional: Calculate Accuracy for classification tasks
+            if isinstance(criterion, nn.CrossEntropyLoss):
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+        
+        avg_loss = total_loss / len(loader)
+        
+        # Logging
+        log_msg = f"Epoch {epoch+1} Loss: {avg_loss:.4f}"
+        if total > 0:
+            acc = 100. * correct / total
+            log_msg += f" | Acc: {acc:.2f}%"
+        print(log_msg)
+        
     return model
 
-def train_segmentation(img_paths, pseudo_masks, device):
-    """Stage 3: Train Segmentation Model"""
-    print(f"\n[Stage 3] Training Segmentation Model for {CONFIG['seg_epochs']} epochs...")
+# --- Stage Specific Setups ---
+
+def run_classifier_stage(img_paths, device, config):
+    print(f"\n[Stage 1] Training Classifier...")
+    
+    labels = [0 if 'noncrack' in os.path.basename(f).lower() else 1 for f in img_paths]
+    
+    # Check config for augmentation
+    if config.get("use_augmentation", False):
+        transform_list = [
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ]
+    else:
+        transform_list = [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ]
+        
+    transform = transforms.Compose(transform_list)
+    
+    dataset = SimpleDataset(img_paths, labels, transform)
+    loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, num_workers=config["num_workers"])
+    
+    model = GradCAMPlusPlus()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr_classifier"])
+    criterion = nn.CrossEntropyLoss()
+    
+    # Train
+    model = train_model(model, loader, optimizer, criterion, device, 
+                        epochs=config["classifier_epochs"], description="Classifier")
+    
+    # Save
+    torch.save(model.state_dict(), config["cls_model_path"])
+    return model
+
+def run_segmentation_stage(img_paths, pseudo_masks, device, config):
+    print(f"\n[Stage 3] Training Segmentation Model...")
     
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -78,64 +117,49 @@ def train_segmentation(img_paths, pseudo_masks, device):
     ])
     
     dataset = CrackSegDataset(img_paths, pseudo_masks, transform)
-    loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=CONFIG["num_workers"])
+    loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=config["num_workers"])
     
-    model = UNetLight().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr_seg"])
+    model = UNetLight()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr_seg"])
     criterion = nn.BCELoss()
     
-    best_loss = float('inf')
-    for epoch in range(CONFIG["seg_epochs"]):
-        model.train()
-        total_loss = 0
-        
-        for imgs, masks in tqdm(loader, desc=f"Ep {epoch+1}"):
-            imgs, masks = imgs.to(device), masks.to(device)
-            optimizer.zero_grad()
-            preds = model(imgs)
-            loss = criterion(preds, masks)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            
-        avg_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1} Loss: {avg_loss:.4f}")
-        
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save(model.state_dict(), CONFIG["seg_model_path"])
-            
+    # Train
+    model = train_model(model, loader, optimizer, criterion, device, 
+                        epochs=config["seg_epochs"], description="Segmentation")
+    
+    # Save
+    torch.save(model.state_dict(), config["seg_model_path"])
     return model
 
-def main():
+# --- Main Runner ---
+
+def main_runner(config, ClassifierClass=GradCAMPlusPlus, SegmenterClass=UNetLight):
+    """
+    Main function acts as a dependency injection point.
+    You can easily pass different model classes here in the future.
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Get Data
-    img_dir = CONFIG["root_dir"] / 'train' / 'images' / '*.jpg'
+    img_dir = config["root_dir"] / 'train' / 'images' / '*.jpg'
     img_paths = sorted(glob.glob(str(img_dir)))
     
     # 2. Train Classifier
-    classifier = train_classifier(img_paths, device)
+    classifier = run_classifier_stage(img_paths, device, config)
     
     # 3. Generate Pseudo Labels
-    # Reload best classifier weights for generation
-    classifier.load_state_dict(torch.load(CONFIG["cls_model_path"], map_location=device))
-    pseudo_masks = generate_pseudo_labels(classifier, img_paths, device, CONFIG)
+    # Reload best/current classifier weights
+    classifier.load_state_dict(torch.load(config["cls_model_path"], map_location=device))
+    pseudo_masks = generate_pseudo_labels(classifier, img_paths, device, config)
     
     # 4. Train Segmentation
-    train_segmentation(img_paths, pseudo_masks, device)
+    run_segmentation_stage(img_paths, pseudo_masks, device, config)
     
     # 5. Evaluation & Testing
     print("\n--- Training Complete. Starting Evaluation ---")
-    
-    # Find best threshold on test set
-    best_thresh = find_best_threshold(CONFIG)
-    
-    # Generate visualization
-    visualize_results(CONFIG, threshold=best_thresh)
-    
-    # Generate submission CSV
-    generate_submission(CONFIG, threshold=best_thresh)
+    best_thresh = find_best_threshold(config)
+    visualize_results(config, threshold=best_thresh)
+    generate_submission(config, threshold=best_thresh)
 
 if __name__ == '__main__':
-    main()
+    main_runner(CONFIG)

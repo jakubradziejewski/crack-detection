@@ -8,7 +8,14 @@ from tqdm import tqdm
 from PIL import Image
 
 from src.models import UNetLight
-from src.utils import mask2rle
+
+def mask2rle(img):
+    """Convert binary mask to RLE encoding"""
+    pixels = img.T.flatten()
+    pixels = np.concatenate([[0], pixels, [0]])
+    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
+    runs[1::2] -= runs[::2]
+    return ' '.join(str(x) for x in runs)
 
 def generate_submission(config, threshold=0.5):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
