@@ -116,19 +116,22 @@ def generate_pseudo_labels(model, img_paths, device, config):
     pseudo_masks = []
     skipped_count = 0
     
+    # CHANGED: Use config image_size
+    img_size = config.get("image_size", 224)
+    
     # Standard transform for CAM generation
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     
-    print(f"Generating pseudo labels (Confidence >= {config['confidence_threshold']}, CAM Percentile={config['cam_percentile']})...")
+    print(f"Generating pseudo labels at {img_size}×{img_size} (Confidence >= {config['confidence_threshold']}, CAM Percentile={config['cam_percentile']})...")
     
     for path in tqdm(img_paths):
         # Explicit non-crack images
         if 'noncrack' in os.path.basename(path).lower():
-            mask = np.zeros((224, 224), dtype=np.uint8)
+            mask = np.zeros((img_size, img_size), dtype=np.uint8)
             pseudo_masks.append(mask)
             continue
             
@@ -145,7 +148,7 @@ def generate_pseudo_labels(model, img_paths, device, config):
             crack_confidence = probs[0, 1].item()
         
         if crack_confidence < config["confidence_threshold"]:
-            mask = np.zeros((224, 224), dtype=np.uint8)
+            mask = np.zeros((img_size, img_size), dtype=np.uint8)
             skipped_count += 1
         else:
             # Backward pass for CAM
@@ -157,16 +160,16 @@ def generate_pseudo_labels(model, img_paths, device, config):
                 cam = model.generate_gradcam_plusplus()
             
             cam = cam.squeeze().cpu().numpy()
-            cam = cv2.resize(cam, (224, 224))
+            cam = cv2.resize(cam, (img_size, img_size))
             cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
             
             threshold = np.percentile(cam, config["cam_percentile"])
             mask = (cam > threshold).astype(np.uint8) * 255
             
-            # Cleanup morphology
-            kernel = np.ones((3, 3), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            # Optional: Cleanup morphology (commented out as per your code)
+            # kernel = np.ones((3, 3), np.uint8)
+            # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1) also this can be added
         
         pseudo_masks.append(mask)
     

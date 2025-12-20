@@ -23,16 +23,18 @@ def get_transforms(config, mode="train"):
         ])
 
     # Training Transforms
-    ops = [transforms.Resize((224, 224))]
-    
+    img_size = config.get("image_size", 224)
+    ops = [transforms.Resize((img_size, img_size))]
     # 1. Rotation Augmentation
     if config.get("use_rotation_aug", False):
-        ops.append(transforms.RandomChoice([
-            transforms.RandomRotation((0, 0)),
+    # RandomApply applies the transformation with probability p
+        ops.append(transforms.RandomApply([
+        transforms.RandomChoice([
             transforms.RandomRotation((90, 90)),
             transforms.RandomRotation((180, 180)),
             transforms.RandomRotation((270, 270))
-        ]))
+        ])
+    ], p=0.5))  # 50% chance to rotate, 50% stays at 0°
 
     # 2. Standard Augmentation
     if config.get("use_augmentation", False):
@@ -146,7 +148,7 @@ def get_cls_dataloaders(config):
     # Note: shuffle must be False if sampler is used
     train_loader = DataLoader(
         train_ds, 
-        batch_size=config["batch_size"], 
+        batch_size=config["batch_size1"], 
         sampler=sampler, 
         shuffle=(sampler is None), 
         num_workers=config["num_workers"]
@@ -154,7 +156,7 @@ def get_cls_dataloaders(config):
     
     val_loader = DataLoader(
         val_ds, 
-        batch_size=config["batch_size"], 
+        batch_size=config["batch_size1"], 
         shuffle=False, 
         num_workers=config["num_workers"]
     )

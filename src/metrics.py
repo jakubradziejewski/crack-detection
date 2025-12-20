@@ -1,3 +1,7 @@
+import sys
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import numpy as np
 import torch
 import torchvision.transforms as transforms
@@ -5,6 +9,8 @@ import cv2
 import glob
 from tqdm import tqdm
 from PIL import Image
+import argparse
+
 from src.models import UNetLight
 
 # --- Core Metric Calculations ---
@@ -29,9 +35,22 @@ def calculate_precision_recall(pred_mask, true_mask):
     
     return precision, recall
 
-# --- Evaluation Loops ---
+# --- Evaluation Function (No Threshold Search!) ---
 
 def evaluate_test_set(config, threshold=0.5, verbose=True):
+    """
+    Evaluate model on test set with a GIVEN threshold.
+    This function should only be called ONCE at the end with the optimal threshold
+    found during validation.
+    
+    Args:
+        config: Configuration dictionary
+        threshold: Pre-determined optimal threshold (from validation)
+        verbose: Whether to print progress
+    
+    Returns:
+        Dictionary with mean IoU, Dice, Precision, Recall
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = UNetLight().to(device)
     
@@ -43,8 +62,9 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
     model.load_state_dict(torch.load(config["seg_model_path"], map_location=device))
     model.eval()
     
+    img_size = config.get("image_size", 224)
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
@@ -52,10 +72,14 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
     test_imgs = sorted(glob.glob(str(config["root_dir"] / 'test' / 'images' / '*.jpg')))
     test_masks = sorted(glob.glob(str(config["root_dir"] / 'test' / 'masks' / '*.jpg')))
     
+    if len(test_imgs) == 0:
+        print(f"Warning: No test images found at {config['root_dir'] / 'test' / 'images'}")
+        return None
+    
     ious, dices, precisions, recalls = [], [], [], []
     
     if verbose:
-        print(f"Evaluating {len(test_imgs)} images (thresh={threshold})...")
+        print(f"\nEvaluating {len(test_imgs)} test images with threshold={threshold:.4f}...")
     
     for img_path, mask_path in tqdm(zip(test_imgs, test_masks), total=len(test_imgs), disable=not verbose):
         img = Image.open(img_path).convert('RGB')
@@ -81,24 +105,71 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
         'mean_iou': np.mean(ious),
         'mean_dice': np.mean(dices),
         'mean_precision': np.mean(precisions),
-        'mean_recall': np.mean(recalls)
+        'mean_recall': np.mean(recalls),
+        'threshold': threshold
     }
     
     if verbose:
-        print(f"Mean IoU: {results['mean_iou']:.4f} | Mean Dice: {results['mean_dice']:.4f}")
+        print(f"\n{'='*60}")
+        print(f"TEST SET RESULTS (Threshold: {threshold:.4f})")
+        print(f"{'='*60}")
+        print(f"  Mean IoU:       {results['mean_iou']:.4f}")
+        print(f"  Mean Dice:      {results['mean_dice']:.4f}")
+        print(f"  Mean Precision: {results['mean_precision']:.4f}")
+        print(f"  Mean Recall:    {results['mean_recall']:.4f}")
+        print(f"{'='*60}\n")
         
     return results
 
-def find_best_threshold(config):
-    print("\nFinding optimal threshold...")
-    best_iou = 0
-    best_thresh = 0.5
+
+# --- Main function for standalone execution ---
+
+def main():
+    """
+    Run metrics evaluation from command line.
     
-    for thresh in config["test_thresholds"]:
-        results = evaluate_test_set(config, threshold=thresh, verbose=False)
-        if results and results['mean_iou'] > best_iou:
-            best_iou = results['mean_iou']
-            best_thresh = thresh
-            print(f"New best: {thresh} (IoU: {best_iou:.4f})")
-            
-    return best_thresh
+    Usage:
+        python src/metrics.py --threshold 0.5
+        python src/metrics.py --threshold 0.42 --image_size 448
+    """
+    parser = argparse.ArgumentParser(description='Evaluate segmentation model on test set')
+    parser.add_argument('--threshold', type=float, default=0.5,
+                        help='Binarization threshold (default: 0.5)')
+    parser.add_argument('--image_size', type=int, default=None,
+                        help='Image size for inference (default: from config)')
+    parser.add_argument('--model_path', type=str, default=None,
+                        help='Path to model checkpoint (default: from config)')
+    
+    args = parser.parse_args()
+    
+    # Import config
+    from config import CONFIG
+    
+    # Override config if needed
+    config = CONFIG.copy()
+    if args.image_size:
+        config["image_size"] = args.image_size
+    if args.model_path:
+        from pathlib import Path
+        config["seg_model_path"] = Path(args.model_path)
+    
+    print(f"\n{'#'*60}")
+    print(f"# TEST SET EVALUATION")
+    print(f"{'#'*60}")
+    print(f"Model: {config['seg_model_path']}")
+    print(f"Threshold: {args.threshold:.4f}")
+    print(f"Image size: {config['image_size']}×{config['image_size']}")
+    
+    # Run evaluation
+    results = evaluate_test_set(config, threshold=args.threshold, verbose=True)
+    
+    if results:
+        print("✓ Evaluation complete!")
+        return 0
+    else:
+        print("✗ Evaluation failed!")
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
