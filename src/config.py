@@ -8,7 +8,7 @@ CONFIG = {
     "batch_size": 32,
     "val_split": 0.15,
     "seed": 42,
-    "num_workers": 4,
+    "num_workers": 0,
 
     # Augmentations
     "use_augmentation": True,
@@ -22,8 +22,8 @@ CONFIG = {
     "lr_seg": 1e-3,
 
     # Semi-Supervised Logic
-    "confidence_threshold": 0.82,  # Confidence to accept a pseudo-label
-    "cam_percentile": 87,          # Percentile for CAM thresholding
+    "confidence_threshold": 0.5,  # Confidence to accept a pseudo-label
+    "cam_percentile": 98,          # Percentile for CAM thresholding
 
     # Model Artifacts
     "cls_model_path": BASE_DIR / "classifier_best.pth",
@@ -31,5 +31,5 @@ CONFIG = {
     "submission_file": BASE_DIR / "submission.csv",
     
     # Testing
-    "test_thresholds": [0.2, 0.25, 0.3, 0.4, 0.5]
+    "test_thresholds": [0.1, 0.15, 0.2, 0.25, 0.3]
 }
