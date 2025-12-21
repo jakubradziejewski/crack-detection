@@ -11,8 +11,7 @@ from pathlib import Path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.config import CONFIG
-from src.inference import Predictor
-from src.metrics import calculate_iou, calculate_dice, calculate_precision_recall
+from src.inference import Predictor, calculate_iou, calculate_dice, calculate_precision_recall
 
 def mask2rle(img):
     """Convert binary mask to RLE encoding for submission"""

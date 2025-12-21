@@ -8,7 +8,7 @@ from tqdm import tqdm
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.inference import Predictor
-from src.metrics import calculate_iou, calculate_dice
+from src.inference import calculate_iou, calculate_dice
 
 def visualize_results_stratified(config, threshold=0.5, save_path='visualization_stratified.png'):
     """

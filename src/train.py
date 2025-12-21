@@ -15,7 +15,6 @@ from config import CONFIG
 from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.visualize import visualize_results_stratified
-from src.submit import generate_submission
 
 
 def train_classifier_with_val(
