@@ -173,7 +173,7 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
     transform = transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(config["dataset_mean"], config["dataset_std"])
     ])
     
     if use_multiscale:
@@ -267,12 +267,7 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
         # Threshold CAM to create binary mask
         threshold = np.percentile(cam_final, config["cam_percentile"])
         mask = (cam_final > threshold).astype(np.uint8) * 255
-        
-        # Optional: Morphological cleanup (uncomment if needed)
-        # kernel = np.ones((3, 3), np.uint8)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        
+
         pseudo_masks.append(mask)
     
     print(f"\nGenerated {len(pseudo_masks)} pseudo labels")

@@ -7,12 +7,14 @@ import cv2
 from pathlib import Path
 import sys
 import os
+import json
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import your models
 from src.models import UNetLight, GradCAMPlusPlus
 
+    
 class Predictor:
     def __init__(self, config, device=None):
         self.config = config
@@ -27,14 +29,11 @@ class Predictor:
         self.seg_model = UNetLight().to(self.device)
         self.load_weights(self.seg_model, config["seg_model_path"])
         self.seg_model.eval()
-        
-        # Transform (Standardized)
-        self.img_size = config.get("image_size", 224)
+        self.img_size = config["image_size"]
         self.transform = transforms.Compose([
             transforms.Resize((self.img_size, self.img_size)),
             transforms.ToTensor(),
-            # Ideally calculate these for your specific dataset
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize(config["dataset_mean"], config["dataset_std"])
         ])
 
     def load_weights(self, model, path):
