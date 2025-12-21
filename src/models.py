@@ -15,30 +15,72 @@ class GradCAMPlusPlus(nn.Module):
     def __init__(self):
         super().__init__()
         backbone = resnet18(pretrained=True)
-        self.features = nn.Sequential(*list(backbone.children())[:-2])
+        
+        # Split backbone into individual layers for multi-scale access
+        self.conv1 = backbone.conv1
+        self.bn1 = backbone.bn1
+        self.relu = backbone.relu
+        self.maxpool = backbone.maxpool
+        
+        self.layer1 = backbone.layer1  # Output: 64 channels
+        self.layer2 = backbone.layer2  # Output: 128 channels
+        self.layer3 = backbone.layer3  # Output: 256 channels
+        self.layer4 = backbone.layer4  # Output: 512 channels
+        
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Linear(512, 2)
         
-        self.gradients = None
-        self.activations = None
+        # Store gradients and activations for multiple layers
+        self.gradients = {}
+        self.activations = {}
         
-    def save_gradient(self, grad):
-        self.gradients = grad
+    def save_gradient(self, name):
+        def hook(grad):
+            self.gradients[name] = grad
+        return hook
         
-    def forward(self, x, return_cam=False):
-        features = self.features(x)
+    def forward(self, x, return_cam=False, cam_layers=None):
+        """
+        Args:
+            x: input tensor
+            return_cam: if True, register hooks for CAM generation
+            cam_layers: list of layers to extract CAMs from (e.g., ['layer2', 'layer3', 'layer4'])
+                       Only used when return_cam=True
+        """
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
         
-        if return_cam:
-            features.register_hook(self.save_gradient)
-            self.activations = features
+        x = self.layer1(x)
         
-        pooled = self.gap(features).flatten(1)
+        # Layer 2 (56x56 for 448x448 input)
+        x = self.layer2(x)
+        if return_cam and cam_layers is not None and 'layer2' in cam_layers:
+            x.register_hook(self.save_gradient('layer2'))
+            self.activations['layer2'] = x
+        
+        # Layer 3 (28x28 for 448x448 input)
+        x = self.layer3(x)
+        if return_cam and cam_layers is not None and 'layer3' in cam_layers:
+            x.register_hook(self.save_gradient('layer3'))
+            self.activations['layer3'] = x
+        
+        # Layer 4 (14x14 for 448x448 input)
+        x = self.layer4(x)
+        if return_cam and cam_layers is not None and 'layer4' in cam_layers:
+            x.register_hook(self.save_gradient('layer4'))
+            self.activations['layer4'] = x
+        
+        pooled = self.gap(x).flatten(1)
         out = self.classifier(pooled)
         return out
     
-    def generate_gradcam_plusplus(self):
-        gradients = self.gradients
-        activations = self.activations
+    def generate_gradcam_plusplus(self, layer_name='layer4'):
+        """Generate Grad-CAM++ for specified layer"""
+        if layer_name not in self.gradients:
+            raise KeyError(f"Layer {layer_name} not found in gradients. Did you call forward with return_cam=True and cam_layers=['{layer_name}']?")
+        
+        gradients = self.gradients[layer_name]
+        activations = self.activations[layer_name]
         
         # Calculate alpha weights (Grad-CAM++)
         alpha_num = gradients.pow(2)
@@ -51,6 +93,7 @@ class GradCAMPlusPlus(nn.Module):
         cam = (weights * activations).sum(dim=1, keepdim=True)
         
         return F.relu(cam)
+
 
 class UNetLight(nn.Module):
     def __init__(self):
@@ -105,18 +148,25 @@ class UNetLight(nn.Module):
         
         return torch.sigmoid(self.out(d1))
 
+
 # --- Generation Utilities ---
 
-def generate_pseudo_labels(model, img_paths, device, config):
+def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True):
     """
-    Generate pseudo labels using Grad-CAM++ with confidence filtering.
-    Using the GradCAMPlusPlus model defined above.
+    Generate pseudo labels using Multi-Scale Grad-CAM++ for better localization.
+    
+    Args:
+        model: GradCAMPlusPlus classifier
+        img_paths: list of image paths
+        device: torch device
+        config: configuration dict
+        use_multiscale: if True, use multi-scale CAM fusion (recommended)
     """
     model.eval()
     pseudo_masks = []
     skipped_count = 0
+    low_confidence_count = 0
     
-    # CHANGED: Use config image_size
     img_size = config.get("image_size", 224)
     
     # Standard transform for CAM generation
@@ -126,9 +176,17 @@ def generate_pseudo_labels(model, img_paths, device, config):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     
-    print(f"Generating pseudo labels at {img_size}×{img_size} (Confidence >= {config['confidence_threshold']}, CAM Percentile={config['cam_percentile']})...")
+    if use_multiscale:
+        print(f"Generating MULTI-SCALE pseudo labels at {img_size}×{img_size}")
+        print(f"  - Using layer2 (56×56), layer3 (28×28), layer4 (14×14)")
+        print(f"  - Fusion weights: layer2=0.5, layer3=0.3, layer4=0.2")
+    else:
+        print(f"Generating single-scale pseudo labels at {img_size}×{img_size} (layer4 only)")
     
-    for path in tqdm(img_paths):
+    print(f"  - Confidence threshold: {config['confidence_threshold']}")
+    print(f"  - CAM percentile: {config['cam_percentile']}")
+    
+    for path in tqdm(img_paths, desc="Generating pseudo-labels"):
         # Explicit non-crack images
         if 'noncrack' in os.path.basename(path).lower():
             mask = np.zeros((img_size, img_size), dtype=np.uint8)
@@ -137,41 +195,97 @@ def generate_pseudo_labels(model, img_paths, device, config):
             
         img = Image.open(path).convert('RGB')
         img_t = transform(img).unsqueeze(0).to(device)
-        img_t.requires_grad = True
         
-        # Forward pass
-        output = model(img_t, return_cam=True)
-        
-        # Check confidence
+        # First check confidence WITHOUT requiring gradients
         with torch.no_grad():
+            output = model(img_t, return_cam=False) 
             probs = F.softmax(output, dim=1)
             crack_confidence = probs[0, 1].item()
         
+        # Filter by confidence
         if crack_confidence < config["confidence_threshold"]:
             mask = np.zeros((img_size, img_size), dtype=np.uint8)
-            skipped_count += 1
+            low_confidence_count += 1
+            pseudo_masks.append(mask)
+            continue
+        
+        # Need gradients enabled for CAM generation
+        img_t = img_t.requires_grad_(True)
+        
+        if use_multiscale:
+            # Multi-scale approach: extract CAMs from multiple layers
+            cam_layers = ['layer2', 'layer3', 'layer4']
+            cams = {}
+            
+            for layer_idx, layer_name in enumerate(cam_layers):
+                # Forward pass with hooks for this layer
+                output = model(img_t, return_cam=True, cam_layers=[layer_name])
+                
+                # Backward pass
+                model.zero_grad()
+                class_score = output[:, 1]
+                
+                # Only retain graph if not the last layer
+                retain = (layer_idx < len(cam_layers) - 1)
+                class_score.backward(retain_graph=retain)
+                
+                # Generate CAM
+                with torch.no_grad():
+                    cam = model.generate_gradcam_plusplus(layer_name)
+                    cam = cam.squeeze().cpu().numpy()
+                    
+                    # Resize to target size
+                    cam_resized = cv2.resize(cam, (img_size, img_size))
+                    
+                    # Normalize
+                    cam_norm = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
+                    cams[layer_name] = cam_norm
+            
+            # Fuse CAMs with weighted average
+            # Higher weight for higher-resolution layers (better localization)
+            fused_cam = (0.5 * cams['layer2'] +   # 56×56 - finest details
+                        0.3 * cams['layer3'] +     # 28×28 - medium details  
+                        0.2 * cams['layer4'])      # 14×14 - semantic info
+            
+            cam_final = fused_cam
+            
         else:
-            # Backward pass for CAM
+            # Single-scale approach (original): use only layer4
+            output = model(img_t, return_cam=True, cam_layers=['layer4'])
+            
             model.zero_grad()
             class_score = output[:, 1]
             class_score.backward()
             
             with torch.no_grad():
-                cam = model.generate_gradcam_plusplus()
+                cam = model.generate_gradcam_plusplus('layer4')
             
             cam = cam.squeeze().cpu().numpy()
             cam = cv2.resize(cam, (img_size, img_size))
-            cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-            
-            threshold = np.percentile(cam, config["cam_percentile"])
-            mask = (cam > threshold).astype(np.uint8) * 255
-            
-            # Optional: Cleanup morphology (commented out as per your code)
-            #kernel = np.ones((3, 3), np.uint8)
-            #mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            #mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            cam_final = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+        
+        # Threshold CAM to create binary mask
+        threshold = np.percentile(cam_final, config["cam_percentile"])
+        mask = (cam_final > threshold).astype(np.uint8) * 255
+        
+        # Optional: Morphological cleanup (uncomment if needed)
+        # kernel = np.ones((3, 3), np.uint8)
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         pseudo_masks.append(mask)
     
-    print(f"Generated {len(pseudo_masks)} pseudo labels ({skipped_count} ignored due to low confidence)")
+    print(f"\nGenerated {len(pseudo_masks)} pseudo labels")
+    print(f"  - Low confidence (skipped): {low_confidence_count}")
+    
+    # Print statistics
+    non_empty = sum(1 for m in pseudo_masks if m.max() > 0)
+    print(f"  - Non-empty masks: {non_empty}/{len(pseudo_masks)} ({100*non_empty/len(pseudo_masks):.1f}%)")
+    
+    # Additional diagnostics
+    explicit_noncrack = sum(1 for p in img_paths if 'noncrack' in os.path.basename(p).lower())
+    print(f"  - Explicit non-crack images: {explicit_noncrack}")
+    print(f"  - Crack images processed: {len(img_paths) - explicit_noncrack}")
+    print(f"  - Crack images kept (high conf): {non_empty - explicit_noncrack}")
+    
     return pseudo_masks

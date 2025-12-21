@@ -4,6 +4,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 import cv2
 import glob
@@ -11,7 +12,7 @@ from tqdm import tqdm
 from PIL import Image
 import argparse
 
-from src.models import UNetLight
+from src.models import UNetLight, GradCAMPlusPlus
 
 # --- Core Metric Calculations ---
 
@@ -35,32 +36,40 @@ def calculate_precision_recall(pred_mask, true_mask):
     
     return precision, recall
 
-# --- Evaluation Function (No Threshold Search!) ---
+# --- Evaluation Function (FIXED: Now uses classifier!) ---
 
 def evaluate_test_set(config, threshold=0.5, verbose=True):
     """
-    Evaluate model on test set with a GIVEN threshold.
-    This function should only be called ONCE at the end with the optimal threshold
-    found during validation.
+    Evaluate model on test set with classifier + segmentation pipeline.
+    
+    CRITICAL FIX: Now uses the classifier to detect if image has cracks BEFORE segmentation.
+    This matches the training pipeline where only high-confidence images get pseudo-masks.
     
     Args:
         config: Configuration dictionary
-        threshold: Pre-determined optimal threshold (from validation)
+        threshold: Pre-determined optimal threshold for segmentation (from validation)
         verbose: Whether to print progress
     
     Returns:
         Dictionary with mean IoU, Dice, Precision, Recall
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = UNetLight().to(device)
-    
-    # Load Weights
-    if not config["seg_model_path"].exists():
-        print(f"Model not found at {config['seg_model_path']}")
-        return None
 
-    model.load_state_dict(torch.load(config["seg_model_path"], map_location=device))
-    model.eval()
+    # 1. Classifier (to detect if image has cracks)
+    classifier = GradCAMPlusPlus().to(device)
+    if not config["cls_model_path"].exists():
+        print(f"Classifier not found at {config['cls_model_path']}")
+        return None
+    classifier.load_state_dict(torch.load(config["cls_model_path"], map_location=device))
+    classifier.eval()
+    
+    # 2. Segmentation model (to segment cracks if present)
+    seg_model = UNetLight().to(device)
+    if not config["seg_model_path"].exists():
+        print(f"Segmentation model not found at {config['seg_model_path']}")
+        return None
+    seg_model.load_state_dict(torch.load(config["seg_model_path"], map_location=device))
+    seg_model.eval()
     
     img_size = config.get("image_size", 224)
     transform = transforms.Compose([
@@ -76,10 +85,16 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
         print(f"Warning: No test images found at {config['root_dir'] / 'test' / 'images'}")
         return None
     
+    confidence_threshold = config.get("confidence_threshold", 0.8)
+    
     ious, dices, precisions, recalls = [], [], [], []
+    classified_as_crack = 0
+    classified_as_no_crack = 0
     
     if verbose:
-        print(f"\nEvaluating {len(test_imgs)} test images with threshold={threshold:.4f}...")
+        print(f"\nEvaluating {len(test_imgs)} test images")
+        print(f"  - Segmentation threshold: {threshold:.4f}")
+        print(f"  - Confidence threshold: {confidence_threshold:.4f}")
     
     for img_path, mask_path in tqdm(zip(test_imgs, test_masks), total=len(test_imgs), disable=not verbose):
         img = Image.open(img_path).convert('RGB')
@@ -88,11 +103,27 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
         
         img_t = transform(img).unsqueeze(0).to(device)
         
+        # ===== STEP 1: Check if image has cracks using classifier =====
         with torch.no_grad():
-            pred = model(img_t).squeeze().cpu().numpy()
+            cls_output = classifier(img_t, return_cam=False)
+            probs = F.softmax(cls_output, dim=1)
+            crack_confidence = probs[0, 1].item()
         
-        pred = cv2.resize(pred, (original_size[1], original_size[0]))
-        pred_binary = (pred > threshold).astype(np.uint8)
+        # If low confidence (no crack detected), predict empty mask
+        if crack_confidence < confidence_threshold:
+            pred_binary = np.zeros(original_size, dtype=np.uint8)
+            classified_as_no_crack += 1
+        else:
+            # ===== STEP 2: If crack detected, run segmentation =====
+            classified_as_crack += 1
+            
+            with torch.no_grad():
+                pred = seg_model(img_t).squeeze().cpu().numpy()
+            
+            pred = cv2.resize(pred, (original_size[1], original_size[0]))
+            pred_binary = (pred > threshold).astype(np.uint8)
+        
+        # Calculate metrics
         true_binary = (true_mask > 127).astype(np.uint8)
         
         ious.append(calculate_iou(pred_binary, true_binary))
@@ -106,17 +137,24 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
         'mean_dice': np.mean(dices),
         'mean_precision': np.mean(precisions),
         'mean_recall': np.mean(recalls),
-        'threshold': threshold
+        'threshold': threshold,
+        'confidence_threshold': confidence_threshold,
+        'classified_as_crack': classified_as_crack,
+        'classified_as_no_crack': classified_as_no_crack
     }
     
     if verbose:
         print(f"\n{'='*60}")
-        print(f"TEST SET RESULTS (Threshold: {threshold:.4f})")
+        print(f"TEST SET RESULTS")
         print(f"{'='*60}")
-        print(f"  Mean IoU:       {results['mean_iou']:.4f}")
-        print(f"  Mean Dice:      {results['mean_dice']:.4f}")
-        print(f"  Mean Precision: {results['mean_precision']:.4f}")
-        print(f"  Mean Recall:    {results['mean_recall']:.4f}")
+        print(f"Classification:")
+        print(f"  - Images with CRACK:    {classified_as_crack}/{len(test_imgs)} ({100*classified_as_crack/len(test_imgs):.1f}%)")
+        print(f"  - Images with NO CRACK: {classified_as_no_crack}/{len(test_imgs)} ({100*classified_as_no_crack/len(test_imgs):.1f}%)")
+        print(f"\nSegmentation Metrics (threshold={threshold:.4f}):")
+        print(f"  - Mean IoU:       {results['mean_iou']:.4f}")
+        print(f"  - Mean Dice:      {results['mean_dice']:.4f}")
+        print(f"  - Mean Precision: {results['mean_precision']:.4f}")
+        print(f"  - Mean Recall:    {results['mean_recall']:.4f}")
         print(f"{'='*60}\n")
         
     return results
@@ -127,37 +165,25 @@ def evaluate_test_set(config, threshold=0.5, verbose=True):
 def main():
     """
     Run metrics evaluation from command line.
-    
     Usage:
         python src/metrics.py --threshold 0.5
-        python src/metrics.py --threshold 0.42 --image_size 448
     """
     parser = argparse.ArgumentParser(description='Evaluate segmentation model on test set')
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='Binarization threshold (default: 0.5)')
-    parser.add_argument('--image_size', type=int, default=None,
-                        help='Image size for inference (default: from config)')
-    parser.add_argument('--model_path', type=str, default=None,
-                        help='Path to model checkpoint (default: from config)')
-    
+
     args = parser.parse_args()
     
     # Import config
     from config import CONFIG
-    
-    # Override config if needed
     config = CONFIG.copy()
-    if args.image_size:
-        config["image_size"] = args.image_size
-    if args.model_path:
-        from pathlib import Path
-        config["seg_model_path"] = Path(args.model_path)
-    
     print(f"\n{'#'*60}")
     print(f"# TEST SET EVALUATION")
     print(f"{'#'*60}")
-    print(f"Model: {config['seg_model_path']}")
-    print(f"Threshold: {args.threshold:.4f}")
+    print(f"Classifier: {config['cls_model_path']}")
+    print(f"Segmentation: {config['seg_model_path']}")
+    print(f"Segmentation threshold: {args.threshold:.4f}")
+    print(f"Confidence threshold: {config['confidence_threshold']:.4f}")
     print(f"Image size: {config['image_size']}×{config['image_size']}")
     
     # Run evaluation
