@@ -1,44 +1,22 @@
-import torch
-import torch.nn.functional as F
-import torchvision.transforms as transforms
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 import glob
 import os
-from PIL import Image
+from tqdm import tqdm
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.models import UNetLight, GradCAMPlusPlus
+from src.inference import Predictor
 from src.metrics import calculate_iou, calculate_dice
 
 def visualize_results_stratified(config, threshold=0.5, save_path='visualization_stratified.png'):
     """
     Visualize 3 best, 3 median, and 3 worst predictions based on IoU.
     Excludes perfect scores (IoU=1) and complete failures (IoU=0).
-    
-    FIXED: Now uses classifier + segmentation pipeline (matching training & inference)
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # ===== CRITICAL FIX: Load BOTH models =====
-    # 1. Classifier
-    classifier = GradCAMPlusPlus().to(device)
-    classifier.load_state_dict(torch.load(config["cls_model_path"], map_location=device))
-    classifier.eval()
-    
-    # 2. Segmentation model
-    seg_model = UNetLight().to(device)
-    seg_model.load_state_dict(torch.load(config["seg_model_path"], map_location=device))
-    seg_model.eval()
-    
-    img_size = config.get("image_size", 224)
-    transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
+    # Initialize predictor (loads both models)
+    predictor = Predictor(config)
     
     # Load test data
     test_imgs = sorted(glob.glob(str(config["root_dir"] / 'test' / 'images' / '*.jpg')))
@@ -54,52 +32,41 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
     print(f"  - Confidence threshold: {confidence_threshold:.4f}")
     print(f"  - Segmentation threshold: {threshold:.4f}")
     
-    # Step 1: Compute IoU for all images
+    # Step 1: Compute IoU for all images using Predictor
     results = []
     classified_as_crack = 0
     classified_as_no_crack = 0
     
-    for img_path, mask_path in zip(test_imgs, test_masks):
-        img = Image.open(img_path).convert('RGB')
+    for img_path, mask_path in tqdm(zip(test_imgs, test_masks), desc="Evaluating"):
+        # Load ground truth
         true_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        original_size = true_mask.shape
-        
-        img_t = transform(img).unsqueeze(0).to(device)
-        
-        # ===== STEP 1: Check confidence with classifier =====
-        with torch.no_grad():
-            cls_output = classifier(img_t, return_cam=False)
-            probs = F.softmax(cls_output, dim=1)
-            crack_confidence = probs[0, 1].item()
-        
-        # If low confidence, predict empty mask
-        if crack_confidence < confidence_threshold:
-            pred = np.zeros(original_size, dtype=np.float32)
-            pred_binary = np.zeros(original_size, dtype=np.uint8)
-            classified_as_no_crack += 1
-        else:
-            # ===== STEP 2: If crack detected, run segmentation =====
-            classified_as_crack += 1
-            
-            with torch.no_grad():
-                pred = seg_model(img_t).squeeze().cpu().numpy()
-            
-            pred = cv2.resize(pred, (original_size[1], original_size[0]))
-            pred_binary = (pred > threshold).astype(np.uint8)
-        
         true_binary = (true_mask > 127).astype(np.uint8)
         
+        # Use Predictor for inference (handles entire pipeline)
+        result = predictor.predict(img_path, seg_threshold=threshold)
+        
+        pred_binary = result['mask']
+        crack_confidence = result['confidence']
+        has_crack = result['has_crack']
+        
+        # Track classification
+        if has_crack:
+            classified_as_crack += 1
+        else:
+            classified_as_no_crack += 1
+        
+        # Calculate metrics
         iou = calculate_iou(pred_binary, true_binary)
         dice = calculate_dice(pred_binary, true_binary)
         
         results.append({
             'img_path': img_path,
             'mask_path': mask_path,
-            'pred': pred,
+            'pred': pred_binary,
             'iou': iou,
             'dice': dice,
             'confidence': crack_confidence,
-            'has_crack': crack_confidence >= confidence_threshold
+            'has_crack': has_crack
         })
     
     print(f"\nClassification results:")
@@ -111,7 +78,6 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
     
     if len(filtered_results) < 9:
         print(f"Warning: Only {len(filtered_results)} images with 0 < IoU < 1. Using all available.")
-        # Fallback: use all results if not enough filtered
         filtered_results = results
     
     # Step 3: Sort by IoU
@@ -135,7 +101,7 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
     
     # Step 5: Visualize
     num_rows = len(selected_results)
-    fig, axes = plt.subplots(num_rows, 4, figsize=(16, 4*num_rows))
+    fig, axes = plt.subplots(num_rows, 3, figsize=(12, 4*num_rows))
     if num_rows == 1: 
         axes = axes.reshape(1, -1)
     
@@ -157,7 +123,7 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
         # Load original image and mask
         original_img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
         true_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        pred_binary = (pred > threshold).astype(np.uint8) * 255
+        pred_display = pred * 255  # Convert to 0-255 for display
         
         # Determine category
         if i < 3:
@@ -178,7 +144,7 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
         axes[i, 0].axis('off')
         
         # 2. Predicted
-        axes[i, 1].imshow(pred_binary, cmap='gray')
+        axes[i, 1].imshow(pred_display, cmap='gray')
         axes[i, 1].set_title(f'Prediction\nIoU: {iou:.3f}')
         axes[i, 1].axis('off')
         
@@ -186,24 +152,13 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
         axes[i, 2].imshow(true_mask, cmap='gray')
         axes[i, 2].set_title(f'Ground Truth\nDice: {dice:.3f}')
         axes[i, 2].axis('off')
-        
-        # 4. Overlay (red = prediction)
-        overlay = original_img.copy()
-        overlay[pred_binary > 127] = [255, 0, 0]  # Red overlay for predictions
-        axes[i, 3].imshow(overlay)
-        axes[i, 3].set_title('Overlay (Red=Pred)')
-        axes[i, 3].axis('off')
     
     plt.suptitle(f'Stratified Results (Seg Thresh={threshold:.3f}, Conf Thresh={confidence_threshold:.3f})', 
                  fontsize=16, fontweight='bold')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"\n✓ Visualization saved to {save_path}")
-    
-    # Print summary statistics
-    print(f"\n{'='*60}")
-    print("SUMMARY STATISTICS")
-    print(f"{'='*60}")
+
     all_ious = [r['iou'] for r in results]
     print(f"  Total images:        {len(results)}")
     print(f"  Perfect (IoU=1):     {sum(1 for iou in all_ious if iou == 1.0)}")
@@ -216,4 +171,4 @@ def visualize_results_stratified(config, threshold=0.5, save_path='visualization
 if __name__ == "__main__":
     # Import config
     from config import CONFIG
-    visualize_results_stratified(CONFIG, threshold=0.2078, save_path='results_stratified.png')
+    visualize_results_stratified(CONFIG, threshold=0.1294, save_path='results_stratified.png')

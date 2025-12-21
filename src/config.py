@@ -21,14 +21,14 @@ CONFIG = {
     "use_oversampling": True,
 
     # Training Hyperparameters
-    "classifier_epochs": 5,
-    "seg_epochs": 5,
+    "classifier_epochs": 1,
+    "seg_epochs": 1,
     "lr_classifier": 1e-4,
     "lr_seg": 1e-3,
 
     # Semi-Supervised Logic
     "confidence_threshold": 0.7,
-    "cam_percentile": 96,
+    "cam_percentile": 98,
 
     # Model Artifacts
     "cls_model_path": BASE_DIR / "classifier_best.pth",

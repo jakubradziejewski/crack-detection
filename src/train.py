@@ -252,35 +252,28 @@ def main_runner(config):
     # Use train_loader since we have no val split
     best_thresh = find_threshold_otsu(seg_model, train_loader, device)
 
+    # ... inside main_runner(config) ...
+
     print(f"# STAGE 5: TEST SET EVALUATION")
-
-    from src.metrics import evaluate_test_set
-
-    test_results = evaluate_test_set(config, threshold=best_thresh, verbose=True)
+    from src.test import run_evaluation, generate_submission
+    from src.inference import Predictor
+    
+    # Init predictor once
+    predictor = Predictor(config)
+    test_dir = config["root_dir"] / 'test'
+    
+    # Run Eval
+    run_evaluation(predictor, test_dir, best_thresh)
 
     print(f"# STAGE 6: VISUALIZATION & SUBMISSION")
-
-    # Visualize results with optimal threshold
-    print("\nGenerating visualizations...")
-    visualize_results_stratified(
-        config, threshold=best_thresh, save_path="results_stratified.png"
-    )
-
-    # Generate submission
-    print("\nGenerating submission file...")
-    generate_submission(config, threshold=best_thresh)
+    
+    # Run Submission
+    generate_submission(predictor, test_dir, config["submission_file"], best_thresh)
+    
+    # Run Visualization
+    visualize_results_stratified(config, threshold=best_thresh)
 
     print(f"PIPELINE COMPLETE")
-    print(f"  Optimal Threshold: {best_thresh:.4f}")
-    print(f"  Image Resolution: {config['image_size']}×{config['image_size']}")
-    print(f"  Classifier: Trained with validation split")
-    print(f"  Segmentation: Trained on ALL pseudo-masks (no val split)")
-    if test_results:
-        print(f"\n  TEST SET RESULTS:")
-        print(f"    Mean IoU:       {test_results['mean_iou']:.4f}")
-        print(f"    Mean Dice:      {test_results['mean_dice']:.4f}")
-        print(f"    Mean Precision: {test_results['mean_precision']:.4f}")
-        print(f"    Mean Recall:    {test_results['mean_recall']:.4f}")
 
 
 if __name__ == "__main__":
