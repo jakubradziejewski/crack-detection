@@ -36,7 +36,7 @@ def calculate_precision_recall(pred_mask, true_mask):
     
     return precision, recall
 
-# --- Evaluation Function (FIXED: Now uses classifier!) ---
+# --- Evaluation Function ---
 
 def evaluate_test_set(config, threshold=0.5, verbose=True):
     """
