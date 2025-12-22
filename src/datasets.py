@@ -14,16 +14,16 @@ def get_transforms(config, mode="train"):
     Returns transforms based on config and mode ('train' or 'val').
     """
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    
+    img_size = config.get("image_size", 224)
+
     if mode == "val":
         return transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
             normalize
         ])
 
     # Training Transforms
-    img_size = config.get("image_size", 224)
     ops = [transforms.Resize((img_size, img_size))]
     # 1. Rotation Augmentation
     if config.get("use_rotation_aug", False):
