@@ -15,6 +15,11 @@ from config import CONFIG
 from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.visualize import visualize_results_stratified
+from src.adaptive_thresholds import (
+    find_confidence_threshold,
+    find_cam_percentile,
+    visualize_threshold_analysis
+)
 
 
 def train_classifier_with_val(
@@ -104,7 +109,6 @@ def train_classifier_with_val(
                 print(f"\n⚠ Early stopping triggered at epoch {epoch+1}")
                 break
 
-
     # Load best model
     print(f"\nTraining complete. Loading best model from {save_path}")
     model.load_state_dict(torch.load(save_path, map_location=device))
@@ -167,7 +171,7 @@ def run_classifier_stage(device, config):
         save_path=config["cls_model_path"],
     )
 
-    return model
+    return model, val_loader
 
 
 def run_segmentation_stage(img_paths, pseudo_masks, device, config):
@@ -214,19 +218,70 @@ def run_segmentation_stage(img_paths, pseudo_masks, device, config):
     return model, train_loader
 
 
-def main_runner(config):
+def main_runner(config, use_adaptive_thresholds=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}")
     print(f"Image size: {config['image_size']}×{config['image_size']}")
 
-
-    # Train Classifier (with validation)
+    # STAGE 1: CLASSIFIER TRAINING
+    print(f"\n{'#'*60}")
     print(f"# STAGE 1: CLASSIFIER TRAINING")
-    classifier = run_classifier_stage(device, config)
+    print(f"{'#'*60}")
+    classifier, val_loader = run_classifier_stage(device, config)
 
+    # STAGE 1.5: ADAPTIVE THRESHOLD SELECTION (NEW!)
+    if use_adaptive_thresholds:
+        print(f"\n{'#'*60}")
+        print(f"# STAGE 1.5: ADAPTIVE THRESHOLD SELECTION")
+        print(f"{'#'*60}")
+        
+        # Find optimal confidence threshold
+        print("\n[1/3] Finding optimal confidence threshold...")
+        optimal_confidence, conf_metrics = find_confidence_threshold(
+            model=classifier,
+            loader=val_loader,
+            device=device,
+            method='f1_max'
+        )
+        
+        # Update config with optimal threshold
+        config["confidence_threshold"] = optimal_confidence
+        
+        # Find optimal CAM percentile
+        print("\n[3/3] Finding optimal CAM percentile...")
+        img_dir = config["root_dir"] / "train" / "images" / "*.jpg"
+        all_img_paths = sorted(glob.glob(str(img_dir)))
+        
+        optimal_percentile, perc_analysis = find_cam_percentile(
+            model=classifier,
+            img_paths=all_img_paths,
+            device=device,
+            config=config,
+            test_percentiles=[90, 92, 94, 95, 96, 97, 98],
+            confidence_threshold=optimal_confidence
+        )
+        
+        # Update config with optimal percentile
+        config["cam_percentile"] = optimal_percentile
+        
+        print(f"\n{'='*60}")
+        print(f"ADAPTIVE THRESHOLDS DETERMINED:")
+        print(f"{'='*60}")
+        print(f"  Confidence Threshold: {optimal_confidence:.4f}")
+        print(f"  CAM Percentile:       {optimal_percentile}")
+        print(f"  F1 Score:             {conf_metrics['f1']:.4f}")
+        print(f"  Precision:            {conf_metrics['precision']:.4f}")
+        print(f"  Recall:               {conf_metrics['recall']:.4f}")
+        print(f"{'='*60}\n")
+    else:
+        print(f"\nUsing hardcoded thresholds:")
+        print(f"  Confidence: {config['confidence_threshold']}")
+        print(f"  CAM Percentile: {config['cam_percentile']}")
 
-    # Generate Pseudo Labels
+    # STAGE 2: PSEUDO-LABEL GENERATION
+    print(f"\n{'#'*60}")
     print(f"# STAGE 2: PSEUDO-LABEL GENERATION")
+    print(f"{'#'*60}")
 
     img_dir = config["root_dir"] / "train" / "images" / "*.jpg"
     all_img_paths = sorted(glob.glob(str(img_dir)))
@@ -238,42 +293,59 @@ def main_runner(config):
         classifier, all_img_paths, device, config, use_multiscale=True
     )
 
-    # Train Segmentation (NO validation)
+    # STAGE 3: SEGMENTATION TRAINING
+    print(f"\n{'#'*60}")
     print(f"# STAGE 3: SEGMENTATION TRAINING")
+    print(f"{'#'*60}")
     seg_model, train_loader = run_segmentation_stage(
         all_img_paths, pseudo_masks, device, config
     )
 
-    print(f"# STAGE 4: THRESHOLD OPTIMIZATION")
+    # STAGE 4: THRESHOLD OPTIMIZATION
+    print(f"\n{'#'*60}")
+    print(f"# STAGE 4: SEGMENTATION THRESHOLD OPTIMIZATION")
+    print(f"{'#'*60}")
 
     from src.threshold_selection import find_threshold_otsu
 
-    # Use train_loader since we have no val split
     best_thresh = find_threshold_otsu(seg_model, train_loader, device)
 
-    # ... inside main_runner(config) ...
-
+    # STAGE 5: TEST SET EVALUATION
+    print(f"\n{'#'*60}")
     print(f"# STAGE 5: TEST SET EVALUATION")
+    print(f"{'#'*60}")
     from src.test import run_evaluation, generate_submission
     from src.inference import Predictor
-    
-    # Init predictor once
+
     predictor = Predictor(config)
-    test_dir = config["root_dir"] / 'test'
-    
-    # Run Eval
+    test_dir = config["root_dir"] / "test"
+
     run_evaluation(predictor, test_dir, best_thresh)
 
+    # STAGE 6: VISUALIZATION & SUBMISSION
+    print(f"\n{'#'*60}")
     print(f"# STAGE 6: VISUALIZATION & SUBMISSION")
-    
-    # Run Submission
+    print(f"{'#'*60}")
+
     generate_submission(predictor, test_dir, config["submission_file"], best_thresh)
-    
-    # Run Visualization
     visualize_results_stratified(config, threshold=best_thresh)
 
+    print(f"\n{'='*60}")
     print(f"PIPELINE COMPLETE")
+    print(f"{'='*60}")
+    print(f"Final Configuration:")
+    print(f"  Confidence Threshold: {config['confidence_threshold']:.4f}")
+    print(f"  CAM Percentile:       {config['cam_percentile']}")
+    print(f"  Seg Threshold:        {best_thresh:.4f}")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
-    main_runner(CONFIG)
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train crack detection pipeline')
+    parser.add_argument('--no-adaptive', action='store_true',
+                        help='Disable adaptive threshold selection (use hardcoded values)')
+    args = parser.parse_args()
+    
+    main_runner(CONFIG, use_adaptive_thresholds=not args.no_adaptive)
