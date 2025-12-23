@@ -9,6 +9,10 @@ import os
 from PIL import Image
 from tqdm import tqdm
 
+# CRF Imports
+import pydensecrf.densecrf as dcrf
+from pydensecrf.utils import unary_from_labels
+
 # --- Models ---
 
 class GradCAMPlusPlus(nn.Module):
@@ -151,16 +155,56 @@ class UNetLight(nn.Module):
 
 # --- Generation Utilities ---
 
+def refine_with_crf(original_image, cam_mask):
+    """
+    Refine the coarse CAM mask using DenseCRF to snap to boundaries.
+    Corrected to handle noisy pavement textures.
+    """
+    # 1. Preprocess CAM to be unary potential
+    H, W = cam_mask.shape
+    
+    # Clip to avoid log(0)
+    cam_mask = np.clip(cam_mask, 1e-5, 1.0 - 1e-5) 
+    
+    # Create [2, H, W] probabilities (bg, fg)
+    probs = np.stack([1.0 - cam_mask, cam_mask], axis=0)
+    
+    # Negative log probability is energy
+    U = -np.log(probs)
+    U = U.reshape(2, -1) # Flatten
+    U = np.ascontiguousarray(U).astype(np.float32)
+    
+    # 2. Setup CRF
+    d = dcrf.DenseCRF2D(W, H, 2)
+    d.setUnaryEnergy(U)
+    
+    # 3. Pairwise Potentials
+    
+    # A. Gaussian (smoothness): Enforces local spatial consistency.
+    # Keep compat low to avoid over-smoothing.
+    d.addPairwiseGaussian(sxy=(3, 3), compat=3, kernel=dcrf.DIAG_KERNEL, normalization=dcrf.NORMALIZE_SYMMETRIC)
+    
+    # B. Bilateral (appearance): Uses color similarity to refine edges.
+    # TUNING FOR CRACKS:
+    # - srgb: Increased from 13 to 25. This makes it LESS sensitive to subtle 
+    #         grainy noise in the asphalt, focusing only on strong contrasts.
+    # - compat: Decreased from 10 to 5. This reduces the "strength" of the 
+    #           color term, trusting the CAM (unary) more so it doesn't 
+    #           delete faint parts of the crack.
+    d.addPairwiseBilateral(sxy=(50, 50), srgb=(25, 25, 25), rgbim=original_image, 
+                           compat=5, kernel=dcrf.DIAG_KERNEL, normalization=dcrf.NORMALIZE_SYMMETRIC)
+    
+    # 4. Inference
+    Q = d.inference(5) 
+    map_res = np.argmax(Q, axis=0).reshape((H, W))
+    
+    return map_res.astype(np.uint8) * 255
+
+
 def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True):
     """
-    Generate pseudo labels using Multi-Scale Grad-CAM++ for better localization.
-    
-    Args:
-        model: GradCAMPlusPlus classifier
-        img_paths: list of image paths
-        device: torch device
-        config: configuration dict
-        use_multiscale: if True, use multi-scale CAM fusion (recommended)
+    Generate pseudo labels using Multi-Scale Grad-CAM++ refined by DenseCRF.
+    Includes Gamma Boosting and Morphological Post-Processing.
     """
     model.eval()
     pseudo_masks = []
@@ -177,14 +221,9 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
     ])
     
     if use_multiscale:
-        print(f"Generating MULTI-SCALE pseudo labels at {img_size}×{img_size}")
-        print(f"  - Using layer2 (56×56), layer3 (28×28), layer4 (14×14)")
-        print(f"  - Fusion weights: layer2=0.5, layer3=0.3, layer4=0.2")
+        print(f"Generating MULTI-SCALE pseudo labels at {img_size}×{img_size} with TUNED CRF Refinement")
     else:
-        print(f"Generating single-scale pseudo labels at {img_size}×{img_size} (layer4 only)")
-    
-    print(f"  - Confidence threshold: {config['confidence_threshold']}")
-    print(f"  - CAM percentile: {config['cam_percentile']}")
+        print(f"Generating single-scale pseudo labels at {img_size}×{img_size} with TUNED CRF Refinement")
     
     for path in tqdm(img_paths, desc="Generating pseudo-labels"):
         # Explicit non-crack images
@@ -193,10 +232,15 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
             pseudo_masks.append(mask)
             continue
             
-        img = Image.open(path).convert('RGB')
-        img_t = transform(img).unsqueeze(0).to(device)
+        # Load and resize original image for CRF
+        img_pil = Image.open(path).convert('RGB')
+        img_resized = img_pil.resize((img_size, img_size), Image.BILINEAR)
+        img_np = np.array(img_resized)  # Keep as uint8 numpy for CRF
         
-        # First check confidence WITHOUT requiring gradients
+        # Prepare tensor for model
+        img_t = transform(img_pil).unsqueeze(0).to(device)
+        
+        # First check confidence
         with torch.no_grad():
             output = model(img_t, return_cam=False) 
             probs = F.softmax(output, dim=1)
@@ -213,79 +257,60 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
         img_t = img_t.requires_grad_(True)
         
         if use_multiscale:
-            # Multi-scale approach: extract CAMs from multiple layers
             cam_layers = ['layer2', 'layer3', 'layer4']
             cams = {}
             
             for layer_idx, layer_name in enumerate(cam_layers):
-                # Forward pass with hooks for this layer
                 output = model(img_t, return_cam=True, cam_layers=[layer_name])
                 
-                # Backward pass
                 model.zero_grad()
                 class_score = output[:, 1]
-                
-                # Only retain graph if not the last layer
                 retain = (layer_idx < len(cam_layers) - 1)
                 class_score.backward(retain_graph=retain)
                 
-                # Generate CAM
                 with torch.no_grad():
                     cam = model.generate_gradcam_plusplus(layer_name)
                     cam = cam.squeeze().cpu().numpy()
-                    
-                    # Resize to target size
                     cam_resized = cv2.resize(cam, (img_size, img_size))
-                    
-                    # Normalize
                     cam_norm = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
                     cams[layer_name] = cam_norm
             
-            # Fuse CAMs with weighted average
-            # Higher weight for higher-resolution layers (better localization)
-            fused_cam = (0.5 * cams['layer2'] +   # 56×56 - finest details
-                        0.3 * cams['layer3'] +     # 28×28 - medium details  
-                        0.2 * cams['layer4'])      # 14×14 - semantic info
-            
+            fused_cam = (0.5 * cams['layer2'] + 0.3 * cams['layer3'] + 0.2 * cams['layer4'])
             cam_final = fused_cam
             
         else:
-            # Single-scale approach (original): use only layer4
             output = model(img_t, return_cam=True, cam_layers=['layer4'])
-            
             model.zero_grad()
             class_score = output[:, 1]
             class_score.backward()
-            
             with torch.no_grad():
                 cam = model.generate_gradcam_plusplus('layer4')
-            
             cam = cam.squeeze().cpu().numpy()
             cam = cv2.resize(cam, (img_size, img_size))
             cam_final = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
         
-        # Threshold CAM to create binary mask
-        threshold = np.percentile(cam_final, config["cam_percentile"])
-        mask = (cam_final > threshold).astype(np.uint8) * 255
+        # Normalize
+        cam_final = (cam_final - cam_final.min()) / (cam_final.max() - cam_final.min() + 1e-8)
+
+        # --- IMPROVEMENT 1: Gamma Boost ---
+        # Raise CAM to power < 1.0 (e.g., 0.8) to boost weaker signals.
+        # This prevents the CRF from killing "faint" crack sections.
+        cam_final = np.power(cam_final, 0.8)
+
+        # --- CRF REFINEMENT ---
+        mask = refine_with_crf(img_np, cam_final)
         
-        # Optional: Morphological cleanup (uncomment if needed)
-        # kernel = np.ones((3, 3), np.uint8)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        # --- IMPROVEMENT 2: Morphological Closing ---
+        # Connect fragmented parts (salt-and-pepper noise fix)
+        # We use a small ellipse kernel to bridge gaps in the line
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         
         pseudo_masks.append(mask)
     
     print(f"\nGenerated {len(pseudo_masks)} pseudo labels")
     print(f"  - Low confidence (skipped): {low_confidence_count}")
-    
-    # Print statistics
     non_empty = sum(1 for m in pseudo_masks if m.max() > 0)
     print(f"  - Non-empty masks: {non_empty}/{len(pseudo_masks)} ({100*non_empty/len(pseudo_masks):.1f}%)")
-    
-    # Additional diagnostics
-    explicit_noncrack = sum(1 for p in img_paths if 'noncrack' in os.path.basename(p).lower())
-    print(f"  - Explicit non-crack images: {explicit_noncrack}")
-    print(f"  - Crack images processed: {len(img_paths) - explicit_noncrack}")
-    print(f"  - Crack images kept (high conf): {non_empty - explicit_noncrack}")
     
     return pseudo_masks

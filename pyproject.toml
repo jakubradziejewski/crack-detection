@@ -16,6 +16,8 @@ dependencies = [
     "kagglehub>=0.3.13",
     "scikit-learn>=1.7.2",
     "scikit-image>=0.25.2",
+    "opencv-python-headless>=4.10.0",
+    "pydensecrf@git+https://github.com/lucasb-eyer/pydensecrf.git",
 ]
 
 # Define the custom repository for CUDA 11.8
