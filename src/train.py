@@ -17,8 +17,7 @@ from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.visualize import visualize_results_stratified
 from src.adaptive_thresholds import (
     find_confidence_threshold,
-    find_cam_percentile,
-    visualize_threshold_analysis
+    find_cam_percentile
 )
 
 

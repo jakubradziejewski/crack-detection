@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, precision_recall_curve
 import matplotlib.pyplot as plt
+import cv2
 
 
 def find_confidence_threshold(model, loader, device, method='f1_max'):
