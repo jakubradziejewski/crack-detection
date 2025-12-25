@@ -78,7 +78,7 @@ def generate_submission(predictor, test_dir, output_file, threshold):
 
 if __name__ == "__main__":
     # Hardcode threshold here for debugging/standalone runs
-    DEBUG_THRESHOLD = 0.2078 
+    DEBUG_THRESHOLD = 0.2275
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default='eval', choices=['eval', 'submit'], 

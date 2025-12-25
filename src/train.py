@@ -7,14 +7,15 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import glob
-import numpy as np
 from tqdm import tqdm
-from sklearn.model_selection import train_test_split
 
 from config import CONFIG
 from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.visualize import visualize_results_stratified
+from src.threshold_selection import find_threshold_otsu, find_confidence_threshold
+from src.test import run_evaluation, generate_submission
+from src.inference import Predictor
 
 
 def train_classifier_with_val(
@@ -104,7 +105,6 @@ def train_classifier_with_val(
                 print(f"\n⚠ Early stopping triggered at epoch {epoch+1}")
                 break
 
-
     # Load best model
     print(f"\nTraining complete. Loading best model from {save_path}")
     model.load_state_dict(torch.load(save_path, map_location=device))
@@ -167,7 +167,7 @@ def run_classifier_stage(device, config):
         save_path=config["cls_model_path"],
     )
 
-    return model
+    return model, val_loader
 
 
 def run_segmentation_stage(img_paths, pseudo_masks, device, config):
@@ -219,14 +219,17 @@ def main_runner(config):
     print(f"\nUsing device: {device}")
     print(f"Image size: {config['image_size']}×{config['image_size']}")
 
+    print("CLASSIFIER TRAINING")
+    classifier, val_loader = run_classifier_stage(device, config)
 
-    # Train Classifier (with validation)
-    print(f"# STAGE 1: CLASSIFIER TRAINING")
-    classifier = run_classifier_stage(device, config)
+    print("OPTIMAL CONFIDENCE THRESHOLD BASED ON F1 SCORE from VAL SET")
+    optimal_confidence = find_confidence_threshold(
+        model=classifier, loader=val_loader, device=device
+    )
 
+    config["confidence_threshold"] = optimal_confidence
 
-    # Generate Pseudo Labels
-    print(f"# STAGE 2: PSEUDO-LABEL GENERATION")
+    print("PSEUDO-LABEL GENERATION")
 
     img_dir = config["root_dir"] / "train" / "images" / "*.jpg"
     all_img_paths = sorted(glob.glob(str(img_dir)))
@@ -238,41 +241,29 @@ def main_runner(config):
         classifier, all_img_paths, device, config, use_multiscale=True
     )
 
-    # Train Segmentation (NO validation)
-    print(f"# STAGE 3: SEGMENTATION TRAINING")
+
+    print("SEGMENTATION TRAINING")
     seg_model, train_loader = run_segmentation_stage(
         all_img_paths, pseudo_masks, device, config
     )
 
-    print(f"# STAGE 4: THRESHOLD OPTIMIZATION")
+    print("OTSU THRESHOLD SELECTION")
+    best_thresh = find_threshold_otsu(seg_model, train_loader, device, max_samples=1000)
 
-    from src.threshold_selection import find_threshold_otsu
 
-    # Use train_loader since we have no val split
-    best_thresh = find_threshold_otsu(seg_model, train_loader, device)
-
-    # ... inside main_runner(config) ...
-
-    print(f"# STAGE 5: TEST SET EVALUATION")
-    from src.test import run_evaluation, generate_submission
-    from src.inference import Predictor
-    
-    # Init predictor once
+    # Test phase
     predictor = Predictor(config)
-    test_dir = config["root_dir"] / 'test'
-    
-    # Run Eval
+    test_dir = config["root_dir"] / "test"
+
     run_evaluation(predictor, test_dir, best_thresh)
 
-    print(f"# STAGE 6: VISUALIZATION & SUBMISSION")
-    
-    # Run Submission
     generate_submission(predictor, test_dir, config["submission_file"], best_thresh)
-    
-    # Run Visualization
     visualize_results_stratified(config, threshold=best_thresh)
 
-    print(f"PIPELINE COMPLETE")
+    print("Final Configuration:")
+    print(f"  Confidence Threshold: {config['confidence_threshold']:.4f}")
+    print(f"  CAM Percentile:       {config['cam_percentile']}")
+    print(f"  Seg Threshold:        {best_thresh:.4f}")
 
 
 if __name__ == "__main__":
