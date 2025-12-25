@@ -14,7 +14,6 @@ from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.threshold_selection import find_threshold_otsu, find_confidence_threshold
 from src.test import run_evaluation
-from src.inference import Predictor
 
 
 def train_classifier_with_val(
@@ -251,11 +250,16 @@ def main_runner(config):
 
 
     # Test phase
-    predictor = Predictor(config)
+    classifier.eval()
+    seg_model.eval()
+    
     test_dir = config["root_dir"] / "test"
 
     run_evaluation(
-        predictor=predictor,
+        classifier=classifier,
+        seg_model=seg_model,
+        config=config,
+        device=device,
         test_dir=test_dir,
         output_file=config["submission_file"],
         threshold=best_thresh
