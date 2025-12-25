@@ -28,7 +28,7 @@ CONFIG = {
 
     # Semi-Supervised Logic
     "confidence_threshold": 0.7,
-    "cam_percentile": 90,
+    "cam_percentile": 95,
 
     # Model Artifacts
     "cls_model_path": BASE_DIR / "classifier_best.pth",

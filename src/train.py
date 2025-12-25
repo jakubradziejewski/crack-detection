@@ -14,7 +14,7 @@ from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.visualize import visualize_results_stratified
 from src.threshold_selection import find_threshold_otsu, find_confidence_threshold
-from src.test import run_evaluation, generate_submission
+from src.test import run_evaluation
 from src.inference import Predictor
 
 
@@ -255,9 +255,12 @@ def main_runner(config):
     predictor = Predictor(config)
     test_dir = config["root_dir"] / "test"
 
-    run_evaluation(predictor, test_dir, best_thresh)
-
-    generate_submission(predictor, test_dir, config["submission_file"], best_thresh)
+    run_evaluation(
+        predictor=predictor,
+        test_dir=test_dir,
+        output_file=config["submission_file"],
+        threshold=best_thresh
+    )
     visualize_results_stratified(config, threshold=best_thresh)
 
     print("Final Configuration:")
