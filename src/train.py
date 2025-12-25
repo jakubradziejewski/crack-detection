@@ -12,7 +12,6 @@ from tqdm import tqdm
 from config import CONFIG
 from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
-from src.visualize import visualize_results_stratified
 from src.threshold_selection import find_threshold_otsu, find_confidence_threshold
 from src.test import run_evaluation
 from src.inference import Predictor
@@ -261,7 +260,6 @@ def main_runner(config):
         output_file=config["submission_file"],
         threshold=best_thresh
     )
-    visualize_results_stratified(config, threshold=best_thresh)
 
     print("Final Configuration:")
     print(f"  Confidence Threshold: {config['confidence_threshold']:.4f}")
