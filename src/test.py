@@ -66,10 +66,7 @@ def run_evaluation(predictor, test_dir, output_file, threshold):
                 'img_path': img_path,
                 'mask_path': mask_path,
                 'pred': pred_mask,
-                'iou': iou,
-                'dice': dice,
-                'confidence': result['confidence'],
-                'has_crack': result['has_crack']
+                'dice': dice
             })
 
             # === SUBMISSION ===
@@ -88,8 +85,6 @@ def run_evaluation(predictor, test_dir, output_file, threshold):
 
     visualize_results_stratified(
         results=results,
-        threshold=threshold,
-        confidence_threshold=predictor.config.get("confidence_threshold", 0.8),
         save_path='visualization_stratified.png'
     )
 

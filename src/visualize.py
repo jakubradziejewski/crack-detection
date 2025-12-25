@@ -3,111 +3,78 @@ import cv2
 import matplotlib.pyplot as plt
 import os
 
-def visualize_results_stratified(results, threshold, confidence_threshold, save_path='visualization_stratified.png'):
+def visualize_results_stratified(results, save_path='visualization_stratified.png'):
     """
-    Visualize 3 best, 3 median, and 3 worst predictions based on IoU.
-    Excludes perfect scores (IoU=1) and complete failures (IoU=0).
+    Visualize 3 best (<1), 3 median, and 3 worst predictions (>0.01) based on Dice score.
     """
+
+    # Filter: Dice > 0.01 and < 1.0 - not to include non-crack predictions
+    filtered_results = [r for r in results if 0.01 < r['dice'] < 1.0]
     
-    # Classification stats
-    classified_as_crack = sum(1 for r in results if r['has_crack'])
-    classified_as_no_crack = len(results) - classified_as_crack
-    
-    print(f"Classification results:")
-    print(f"  - Images with CRACK:    {classified_as_crack}/{len(results)} ({100*classified_as_crack/len(results):.1f}%)")
-    print(f"  - Images with NO CRACK: {classified_as_no_crack}/{len(results)} ({100*classified_as_no_crack/len(results):.1f}%)")
-    
-    # Filter out perfect (IoU=1) and complete failures (IoU=0)
-    filtered_results = [r for r in results if 0 < r['iou'] < 1]
-    
-    if len(filtered_results) < 9:
-        print(f"Warning: Only {len(filtered_results)} images with 0 < IoU < 1. Using all available.")
-        filtered_results = results
-    
-    # Sort by IoU
-    sorted_results = sorted(filtered_results, key=lambda x: x['iou'])
-    
-    # Select samples
+    # Sort by Dice score
+    sorted_results = sorted(filtered_results, key=lambda x: x['dice'])
     n_samples = len(sorted_results)
     
-    # Best 3 (highest IoU, but not 1.0)
-    best_indices = list(range(max(0, n_samples - 3), n_samples))
-    
-    # Median 3 (middle)
+    # Select 3 worst, 3 median, 3 best
+    worst_indices = list(range(0, min(3, n_samples)))
     mid = n_samples // 2
     median_indices = [max(0, mid - 1), mid, min(n_samples - 1, mid + 1)]
-    
-    # Worst 3 (lowest IoU, but not 0.0)
-    worst_indices = list(range(0, min(3, n_samples)))
+    best_indices = list(range(max(0, n_samples - 3), n_samples))
     
     selected_indices = worst_indices + median_indices + best_indices
     selected_results = [sorted_results[i] for i in selected_indices]
-    
-    # Visualize
+
+    # Create visualization
     num_rows = len(selected_results)
-    fig, axes = plt.subplots(num_rows, 3, figsize=(12, 4*num_rows))
+    fig, axes = plt.subplots(num_rows, 3, figsize=(12, 4 * num_rows))
     if num_rows == 1: 
         axes = axes.reshape(1, -1)
-
-    if len(worst_indices) > 0 and len(best_indices) > 0:
-        print(f"  Worst 3:  IoU {sorted_results[worst_indices[0]]['iou']:.3f} - {sorted_results[worst_indices[-1]]['iou']:.3f}")
-        print(f"  Median 3: IoU {sorted_results[median_indices[0]]['iou']:.3f} - {sorted_results[median_indices[-1]]['iou']:.3f}")
-        print(f"  Best 3:   IoU {sorted_results[best_indices[0]]['iou']:.3f} - {sorted_results[best_indices[-1]]['iou']:.3f}")
     
     for i, result in enumerate(selected_results):
-        img_path = result['img_path']
-        mask_path = result['mask_path']
-        pred = result['pred']
-        iou = result['iou']
-        dice = result['dice']
-        confidence = result['confidence']
-        has_crack = result['has_crack']
+        # Load data
+        original_img = cv2.cvtColor(cv2.imread(result['img_path']), cv2.COLOR_BGR2RGB)
+        true_mask = cv2.imread(result['mask_path'], cv2.IMREAD_GRAYSCALE)
+        pred_display = result['pred'] * 255
         
-        # Load original image and mask
-        original_img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
-        true_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        pred_display = pred * 255  # Convert to 0-255 for display
-        
-        # Determine category
+        # Determine category and color
         if i < 3:
-            category = "WORST"
-            color = 'red'
+            category, color = "WORST", 'red'
         elif i < 6:
-            category = "MEDIAN"
-            color = 'orange'
+            category, color = "MEDIAN", 'orange'
         else:
-            category = "BEST"
-            color = 'green'
+            category, color = "BEST", 'green'
         
-        # 1. Original
+        # Column 1: Original image
         axes[i, 0].imshow(original_img)
-        crack_status = "✓ CRACK" if has_crack else "✗ NO CRACK"
-        axes[i, 0].set_title(f'{category} | {crack_status}\n{os.path.basename(img_path)}\nConf: {confidence:.3f}', 
-                            color=color, fontweight='bold', fontsize=9)
+        axes[i, 0].set_title(
+            f'{category}\n{os.path.basename(result["img_path"])}', 
+            color=color, fontweight='bold', fontsize=9
+        )
         axes[i, 0].axis('off')
         
-        # 2. Predicted
+        # Column 2: Predicted mask
         axes[i, 1].imshow(pred_display, cmap='gray')
-        axes[i, 1].set_title(f'Prediction\nIoU: {iou:.3f}')
+        axes[i, 1].set_title(f'Predicted Mask\nDice: {result["dice"]:.3f}')
         axes[i, 1].axis('off')
         
-        # 3. Ground Truth
+        # Column 3: True mask
         axes[i, 2].imshow(true_mask, cmap='gray')
-        axes[i, 2].set_title(f'Ground Truth\nDice: {dice:.3f}')
+        axes[i, 2].set_title('True Mask')
         axes[i, 2].axis('off')
     
-    plt.suptitle(f'Stratified Results (Seg Thresh={threshold:.3f}, Conf Thresh={confidence_threshold:.3f})', 
-                 fontsize=16, fontweight='bold')
-    plt.tight_layout()
+    plt.suptitle(
+        f'3 Worst, Median, and Best Predictions', 
+        fontsize=16, fontweight='bold', y=0.995
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Visualization saved to {save_path}")
+    print(f"\Visualization saved to {save_path}")
 
-    # Statistics
-    all_ious = [r['iou'] for r in results]
-
-    print(f"  Total images:            {len(results)}")
-    print(f"  Perfect (IoU=1):         {sum(1 for iou in all_ious if iou == 1.0)}")
-    print(f"  Complete fail (IoU=0):   {sum(1 for iou in all_ious if iou == 0.0)}")
-    print(f"  In between (0<IoU<1):    {len(filtered_results)}")
-    print(f"  Mean IoU:                {np.mean(all_ious):.3f}")
-    print(f"  Median IoU:              {np.median(all_ious):.3f}")
+    all_dice = [r['dice'] for r in results]
+    print(f"\nStatistics:")
+    print(f"  Total images:              {len(results)}")
+    print(f"  Dice=1:                    {sum(1 for d in all_dice if d >= 0.999)}")
+    print(f"  0.01<Dice<1:               {len(filtered_results)}")
+    print(f"  Dice≤0.01:                 {sum(1 for d in all_dice if d <= 0.01)}")
+    print(f"  Mean Dice:                 {np.mean(all_dice):.3f}")
+    print(f"  Median Dice:               {np.median(all_dice):.3f}")
