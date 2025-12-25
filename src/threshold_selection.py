@@ -6,75 +6,89 @@ import sys
 import os
 import argparse
 import cv2
-import glob
+import torch.nn.functional as F
+from sklearn.metrics import precision_recall_curve
 
 
-def find_threshold_otsu(model, loader, device):
+def find_confidence_threshold(model, loader, device):
     """
-    Use Otsu's method for threshold selection.
-    
-    Otsu is ideal for segmentation predictions because:
-    - Maximizes between-class variance
-    - Works perfectly for bimodal distributions (background vs cracks)
-    - Fast and robust
-    - No assumptions about distribution skew
-    
-    Speed: ~60s (predictions collected once, Otsu applied)
+    Find optimal confidence threshold that maximizes F1 score.
     """
-    print("\n" + "="*60)
-    print("OTSU THRESHOLD SELECTION")
-    print("="*60)
     
     model.eval()
     
-    # Step 1: Collect predictions
-    print("Collecting predictions from dataset...")
-    start_time = time.time()
+    # Collect predictions and ground truth for validation set
+    all_probs = []
+    all_labels = []
     
-    all_predictions = []
     with torch.no_grad():
-        for imgs, _ in tqdm(loader, desc="Processing batches"):
+        for imgs, labels in tqdm(loader, desc="Evaluating validation set"):
+            imgs = imgs.to(device)
+            outputs = model(imgs, return_cam=False)
+            probs = F.softmax(outputs, dim=1)
+            crack_probs = probs[:, 1].cpu().numpy()
+            
+            all_probs.extend(crack_probs)
+            all_labels.extend(labels.numpy())
+    
+    all_probs = np.array(all_probs)
+    all_labels = np.array(all_labels)
+    
+    # Confidence threshold that maximizes F1 score
+    precision, recall, thresholds = precision_recall_curve(all_labels, all_probs)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+    best_idx = np.argmax(f1_scores)
+    optimal_threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
+    
+    print(f"Optimal confidence threshold: {optimal_threshold:.4f} based on F1 score {f1_scores[best_idx]:.4f}")
+    
+    return optimal_threshold
+
+
+
+def find_threshold_otsu(model, loader, device, max_samples=1000):
+    """
+    Use Otsu's method for threshold selection.
+    """
+
+    if max_samples is not None:
+        print(f"Using {max_samples} samples for threshold selection...")
+    else:
+        print(f"Using all samples for threshold selection...")
+    
+    model.eval()
+    all_predictions = []
+    samples_processed = 0
+    with torch.no_grad():
+        for imgs, _ in loader:
             imgs = imgs.to(device)
             preds = model(imgs)
             pred_values = preds.cpu().numpy().flatten()
             all_predictions.append(pred_values)
-    
+            
+            samples_processed += imgs.size(0)
+            
+            # Early stopping if we've collected enough samples
+            if max_samples is not None and samples_processed >= max_samples:
+                break
+
     all_predictions = np.concatenate(all_predictions)
-    collection_time = time.time() - start_time
-    
-    print(f"✓ Collected {len(all_predictions):,} predictions in {collection_time:.1f}s")
-    
+
     # Convert to 8-bit for Otsu
     predictions_8bit = (all_predictions * 255).astype(np.uint8)
-    
-    # Step 2: Apply Otsu's method
-    print("\nApplying Otsu's method...")
+
     otsu_thresh_8bit, _ = cv2.threshold(
         predictions_8bit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
     threshold = otsu_thresh_8bit / 255.0
 
-    
-    # Print results
-    print(f"\n{'='*60}")
-    print(f"RESULTS:")
-    print(f"{'='*60}")
-    print(f"  ✓ Otsu Threshold:   {threshold:.4f}")
-    print(f"{'='*60}")
-    
+    print(f"  Otsu Threshold:   {threshold:.4f}")
     return threshold
 
 
 def find_threshold_from_checkpoint(checkpoint_path, config):
     """
     Load model from checkpoint and find optimal threshold using Otsu.
-    
-    Args:
-        checkpoint_path: Path to model checkpoint (.pth file)
-        config: Configuration dictionary
-    
-    Usage:
-        python threshold_selection.py --checkpoint model.pth
     """
     from src.models import UNetLight
     from src.datasets import CrackSegDataset
@@ -125,7 +139,7 @@ def find_threshold_from_checkpoint(checkpoint_path, config):
     )
     
     # Find threshold using Otsu
-    threshold = find_threshold_otsu(model, loader, device)
+    threshold = find_threshold_otsu(model, loader, device, max_samples=1000)
     
     return threshold
 
@@ -173,11 +187,7 @@ def main():
     config = CONFIG.copy()
     if args.image_size:
         config["image_size"] = args.image_size
-    
-    # Find threshold
-    print(f"\n{'#'*60}")
-    print(f"# THRESHOLD SELECTION FROM CHECKPOINT")
-    print(f"{'#'*60}")
+
     
     threshold = find_threshold_from_checkpoint(checkpoint_path, config)
     

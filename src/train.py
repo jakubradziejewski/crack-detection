@@ -7,15 +7,15 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import glob
-import numpy as np
 from tqdm import tqdm
-from sklearn.model_selection import train_test_split
 
 from config import CONFIG
 from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import get_cls_dataloaders, CrackSegDataset
 from src.visualize import visualize_results_stratified
-from src.adaptive_thresholds import find_confidence_threshold
+from src.threshold_selection import find_threshold_otsu, find_confidence_threshold
+from src.test import run_evaluation, generate_submission
+from src.inference import Predictor
 
 
 def train_classifier_with_val(
@@ -219,22 +219,17 @@ def main_runner(config):
     print(f"\nUsing device: {device}")
     print(f"Image size: {config['image_size']}×{config['image_size']}")
 
-    # STAGE 1: CLASSIFIER TRAINING & THRESHOLD SELECTION
-    print(f"\n{'#'*60}")
-    print(f"# STAGE 1: CLASSIFIER TRAINING & THRESHOLD SELECTION")
-    print(f"{'#'*60}")
+    print("CLASSIFIER TRAINING")
     classifier, val_loader = run_classifier_stage(device, config)
 
+    print("OPTIMAL CONFIDENCE THRESHOLD BASED ON F1 SCORE from VAL SET")
     optimal_confidence = find_confidence_threshold(
         model=classifier, loader=val_loader, device=device
     )
 
     config["confidence_threshold"] = optimal_confidence
 
-    # STAGE 2: PSEUDO-LABEL GENERATION
-    print(f"\n{'#'*60}")
-    print(f"# STAGE 2: PSEUDO-LABEL GENERATION")
-    print(f"{'#'*60}")
+    print("PSEUDO-LABEL GENERATION")
 
     img_dir = config["root_dir"] / "train" / "images" / "*.jpg"
     all_img_paths = sorted(glob.glob(str(img_dir)))
@@ -246,62 +241,30 @@ def main_runner(config):
         classifier, all_img_paths, device, config, use_multiscale=True
     )
 
-    # STAGE 3: SEGMENTATION TRAINING
-    print(f"\n{'#'*60}")
-    print(f"# STAGE 3: SEGMENTATION TRAINING")
-    print(f"{'#'*60}")
+
+    print("SEGMENTATION TRAINING")
     seg_model, train_loader = run_segmentation_stage(
         all_img_paths, pseudo_masks, device, config
     )
 
-    # STAGE 4: THRESHOLD OPTIMIZATION
-    print(f"\n{'#'*60}")
-    print(f"# STAGE 4: SEGMENTATION THRESHOLD OPTIMIZATION")
-    print(f"{'#'*60}")
+    print("OTSU THRESHOLD SELECTION")
+    best_thresh = find_threshold_otsu(seg_model, train_loader, device, max_samples=1000)
 
-    from src.threshold_selection import find_threshold_otsu
 
-    best_thresh = find_threshold_otsu(seg_model, train_loader, device)
-
-    # STAGE 5: TEST SET EVALUATION
-    print(f"\n{'#'*60}")
-    print(f"# STAGE 5: TEST SET EVALUATION")
-    print(f"{'#'*60}")
-    from src.test import run_evaluation, generate_submission
-    from src.inference import Predictor
-
+    # Test phase
     predictor = Predictor(config)
     test_dir = config["root_dir"] / "test"
 
     run_evaluation(predictor, test_dir, best_thresh)
 
-    # STAGE 6: VISUALIZATION & SUBMISSION
-    print(f"\n{'#'*60}")
-    print(f"# STAGE 6: VISUALIZATION & SUBMISSION")
-    print(f"{'#'*60}")
-
     generate_submission(predictor, test_dir, config["submission_file"], best_thresh)
     visualize_results_stratified(config, threshold=best_thresh)
 
-    print(f"\n{'='*60}")
-    print(f"PIPELINE COMPLETE")
-    print(f"{'='*60}")
-    print(f"Final Configuration:")
+    print("Final Configuration:")
     print(f"  Confidence Threshold: {config['confidence_threshold']:.4f}")
-    print(f"  CAM Percentile:       {config['cam_percentile']} (hardcoded)")
+    print(f"  CAM Percentile:       {config['cam_percentile']}")
     print(f"  Seg Threshold:        {best_thresh:.4f}")
-    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Train crack detection pipeline")
-    parser.add_argument(
-        "--no-adaptive",
-        action="store_true",
-        help="Disable adaptive confidence threshold (use hardcoded value)",
-    )
-    args = parser.parse_args()
-
     main_runner(CONFIG)
