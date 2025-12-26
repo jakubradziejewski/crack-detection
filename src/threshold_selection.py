@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 from tqdm import tqdm
-import time
 import sys
 import os
 import argparse
@@ -10,7 +9,7 @@ import torch.nn.functional as F
 from sklearn.metrics import precision_recall_curve
 
 
-def find_confidence_threshold(model, loader, device):
+def find_confidence_thresh(model, loader, device):
     """
     Find optimal confidence threshold that maximizes F1 score.
     """
@@ -46,7 +45,7 @@ def find_confidence_threshold(model, loader, device):
 
 
 
-def find_threshold_otsu(model, loader, device, max_samples=1000):
+def find_otsu_thresh(model, loader, device, max_samples=1000):
     """
     Use Otsu's method for threshold selection.
     """
@@ -87,11 +86,8 @@ def find_threshold_otsu(model, loader, device, max_samples=1000):
 
 
 def find_threshold_from_checkpoint(checkpoint_path, config):
-    """
-    Load model from checkpoint and find optimal threshold using Otsu.
-    """
     from src.models import UNetLight
-    from src.datasets import CrackSegDataset
+    from src.datasets import ImageDataset
     from torch.utils.data import DataLoader
     from torchvision import transforms
     from sklearn.model_selection import train_test_split
@@ -129,7 +125,13 @@ def find_threshold_from_checkpoint(checkpoint_path, config):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     
-    dataset = CrackSegDataset(all_img_paths, dummy_masks, transform)
+    # Use SimpleImageDataset with segmentation flag
+    dataset = ImageDataset(
+        paths=all_img_paths, 
+        labels=dummy_masks, 
+        transform=transform,
+        is_segmentation=True
+    )
     
     loader = DataLoader(
         dataset,
@@ -139,7 +141,7 @@ def find_threshold_from_checkpoint(checkpoint_path, config):
     )
     
     # Find threshold using Otsu
-    threshold = find_threshold_otsu(model, loader, device, max_samples=1000)
+    threshold = find_otsu_thresh(model, loader, device, max_samples=1000)
     
     return threshold
 

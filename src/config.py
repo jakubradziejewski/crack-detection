@@ -13,7 +13,7 @@ CONFIG = {
     "batch_size1": 16,
     "val_split": 0.15,
     "seed": 42,
-    "num_workers": 0,
+    "num_workers": 2,
 
     # Augmentations
     "use_augmentation": True,
@@ -27,11 +27,11 @@ CONFIG = {
     "lr_seg": 1e-3,
 
     # Semi-Supervised Logic
-    "confidence_threshold": 0.7,
+    "confidence_threshold": 0.11,
     "cam_percentile": 95,
 
     # Model Artifacts
     "cls_model_path": BASE_DIR / "classifier_best.pth",
-    "seg_model_path": BASE_DIR / "crack_seg_model.pth",
+    "seg_model_path": BASE_DIR / "segmentation_best.pth",
     "submission_file": BASE_DIR / "submission.csv",
 }

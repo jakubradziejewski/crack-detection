@@ -1,5 +1,69 @@
 import torch
 import numpy as np
+import torch
+from torch.utils.data import WeightedRandomSampler
+from torchvision import transforms
+import random
+import numpy as np
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def get_transforms(config, mode="train"):
+    """
+    Returns transforms based on config and mode ('train' or 'val').
+    """
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    img_size = config.get("image_size", 224)
+
+    if mode == "val":
+        return transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            normalize
+        ])
+
+    # Training Transforms
+    ops = [transforms.Resize((img_size, img_size))]
+    
+    # 1. Rotation Augmentation
+    if config.get("use_rotation_aug", False):
+        ops.append(transforms.RandomApply([
+            transforms.RandomChoice([
+                transforms.RandomRotation((90, 90)),
+                transforms.RandomRotation((180, 180)),
+                transforms.RandomRotation((270, 270))
+            ])
+        ], p=0.5))
+
+    # 2. Standard Augmentation
+    if config.get("use_augmentation", False):
+        ops.extend([
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2)
+        ])
+
+    ops.extend([transforms.ToTensor(), normalize])
+    return transforms.Compose(ops)
+
+
+def get_oversampler(labels):
+    """
+    Creates a WeightedRandomSampler to balance classes.
+    """
+    labels_tensor = torch.as_tensor(labels)
+    class_counts = torch.bincount(labels_tensor)
+    weights = 1. / class_counts.float()
+    samples_weights = weights[labels_tensor]
+    
+    return WeightedRandomSampler(samples_weights, len(samples_weights))
 
 
 def mask2rle(img):

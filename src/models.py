@@ -9,8 +9,6 @@ import os
 from PIL import Image
 from tqdm import tqdm
 
-# --- Models ---
-
 class GradCAMPlusPlus(nn.Module):
     def __init__(self):
         super().__init__()
@@ -149,22 +147,13 @@ class UNetLight(nn.Module):
         return torch.sigmoid(self.out(d1))
 
 
-# --- Generation Utilities ---
-
 def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True):
     """
     Generate pseudo labels using Multi-Scale Grad-CAM++ for better localization.
-    
-    Args:
-        model: GradCAMPlusPlus classifier
-        img_paths: list of image paths
-        device: torch device
-        config: configuration dict
-        use_multiscale: if True, use multi-scale CAM fusion (recommended)
     """
+
     model.eval()
     pseudo_masks = []
-    skipped_count = 0
     low_confidence_count = 0
     
     img_size = config.get("image_size", 224)
@@ -175,17 +164,8 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    
-    if use_multiscale:
-        print(f"Generating MULTI-SCALE pseudo labels at {img_size}×{img_size}")
-        print(f"  - Using layer2 (56×56), layer3 (28×28), layer4 (14×14)")
-        print(f"  - Fusion weights: layer2=0.5, layer3=0.3, layer4=0.2")
-    else:
-        print(f"Generating single-scale pseudo labels at {img_size}×{img_size} (layer4 only)")
-    
-    print(f"  - Confidence threshold: {config['confidence_threshold']}")
-    print(f"  - CAM percentile: {config['cam_percentile']}")
-    
+
+    print(f"Confidence threshold: {config['confidence_threshold']}, CAM percentile: {config['cam_percentile']}")
     for path in tqdm(img_paths, desc="Generating pseudo-labels"):
         # Explicit non-crack images
         if 'noncrack' in os.path.basename(path).lower():
@@ -267,25 +247,8 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
         # Threshold CAM to create binary mask
         threshold = np.percentile(cam_final, config["cam_percentile"])
         mask = (cam_final > threshold).astype(np.uint8) * 255
-        
-        # Optional: Morphological cleanup (uncomment if needed)
-        # kernel = np.ones((3, 3), np.uint8)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        
         pseudo_masks.append(mask)
     
-    print(f"\nGenerated {len(pseudo_masks)} pseudo labels")
-    print(f"  - Low confidence (skipped): {low_confidence_count}")
-    
-    # Print statistics
-    non_empty = sum(1 for m in pseudo_masks if m.max() > 0)
-    print(f"  - Non-empty masks: {non_empty}/{len(pseudo_masks)} ({100*non_empty/len(pseudo_masks):.1f}%)")
-    
-    # Additional diagnostics
-    explicit_noncrack = sum(1 for p in img_paths if 'noncrack' in os.path.basename(p).lower())
-    print(f"  - Explicit non-crack images: {explicit_noncrack}")
-    print(f"  - Crack images processed: {len(img_paths) - explicit_noncrack}")
-    print(f"  - Crack images kept (high conf): {non_empty - explicit_noncrack}")
-    
+    print(f"Generated {len(pseudo_masks)} pseudo labels")
+    print(f"Skipped to low confidence: {low_confidence_count}")
     return pseudo_masks

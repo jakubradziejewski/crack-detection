@@ -11,12 +11,12 @@ from tqdm import tqdm
 
 from config import CONFIG
 from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
-from src.datasets import get_cls_dataloaders, CrackSegDataset
-from src.threshold_selection import find_threshold_otsu, find_confidence_threshold
+from src.datasets import ImageDataset, classifier_dataloader
+from src.threshold_selection import find_otsu_thresh, find_confidence_thresh
 from src.test import run_evaluation
+from src.utils import set_seed
 
-
-def train_classifier_with_val(
+def train_classifier(
     model, train_loader, val_loader, optimizer, criterion, device, epochs, save_path
 ):
     model.to(device)
@@ -24,10 +24,7 @@ def train_classifier_with_val(
     patience_counter = 0
     patience = 5
 
-    print(f"\n{'='*60}")
-    print(f"Starting Classifier Training")
     print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
-    print(f"{'='*60}\n")
 
     for epoch in range(epochs):
         # === TRAINING ===
@@ -87,20 +84,20 @@ def train_classifier_with_val(
         val_acc = 100.0 * val_correct / val_total
 
         print(f"Epoch {epoch+1}/{epochs} Summary:")
-        print(f"  Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-        print(f"  Val Loss:   {avg_val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
+        print(f"Train Loss: {avg_train_loss:.4f}  | Train Acc: {train_acc:.2f}%")
+        print(f"Val Loss:   {avg_val_loss:.4f}    | Val Acc:   {val_acc:.2f}%")
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
             torch.save(model.state_dict(), save_path)
-            print(f"  ✓ New best model saved! (Val Loss: {best_val_loss:.4f})")
+            print(f"New best model saved! (Val Loss: {best_val_loss:.4f})")
         else:
             patience_counter += 1
-            print(f"  ✗ No improvement ({patience_counter}/{patience})")
+            print(f"No improvement ({patience_counter}/{patience})")
 
             if patience_counter >= patience:
-                print(f"\n⚠ Early stopping triggered at epoch {epoch+1}")
+                print(f"\nEarly stopping triggered at epoch {epoch+1}, no improvement in {patience} epochs.")
                 break
 
     # Load best model
@@ -109,18 +106,18 @@ def train_classifier_with_val(
     return model
 
 
-def train_segmentation_simple(
+def train_segmentation(
     model, train_loader, optimizer, criterion, device, epochs, save_path
 ):
     model.to(device)
 
-    print(f"Starting Segmentation Training, no of batches: {len(train_loader)}")
+    print(f"Segmentation Training, no of batches: {len(train_loader)}")
 
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
 
-        pbar = tqdm(train_loader, desc=f"[Epoch {epoch+1}/{epochs}] Training")
+        pbar = tqdm(train_loader, desc=f"[Epoch {epoch+1}/{epochs}]")
         for inputs, targets in pbar:
             inputs, targets = inputs.to(device), targets.to(device)
 
@@ -140,21 +137,21 @@ def train_segmentation_simple(
 
     # Save final model
     torch.save(model.state_dict(), save_path)
-    print(f"\n✓ Training complete. Model saved to {save_path}")
+    print(f"\nTraining complete. Model saved to {save_path}")
 
     return model
 
 
-def run_classifier_stage(device, config):
+def run_classifier(device, config):
     # Get dataloaders (includes split, augmentation, sampling)
-    train_loader, val_loader = get_cls_dataloaders(config)
+    train_loader, val_loader = classifier_dataloader(config)
 
     model = GradCAMPlusPlus()
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr_classifier"])
     criterion = nn.CrossEntropyLoss()
 
     # Train with validation monitoring
-    model = train_classifier_with_val(
+    model = train_classifier(
         model,
         train_loader,
         val_loader,
@@ -168,7 +165,7 @@ def run_classifier_stage(device, config):
     return model, val_loader
 
 
-def run_segmentation_stage(img_paths, pseudo_masks, device, config):
+def run_segmentation(img_paths, pseudo_masks, device, config):
     img_size = config.get("image_size", 224)
 
     print(f"Training on all {len(img_paths)} images with pseudo-masks")
@@ -182,8 +179,13 @@ def run_segmentation_stage(img_paths, pseudo_masks, device, config):
         ]
     )
 
-    # Create dataset with ALL data
-    train_dataset = CrackSegDataset(img_paths, pseudo_masks, transform)
+    # Create dataset using SimpleImageDataset with segmentation flag
+    train_dataset = ImageDataset(
+        paths=img_paths, 
+        labels=pseudo_masks, 
+        transform=transform, 
+        is_segmentation=True
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -197,8 +199,8 @@ def run_segmentation_stage(img_paths, pseudo_masks, device, config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr_seg"])
     criterion = nn.BCELoss()
 
-    # Train (simple loop, no validation)
-    model = train_segmentation_simple(
+    # Train (no validation)
+    model = train_segmentation(
         model=model,
         train_loader=train_loader,
         optimizer=optimizer,
@@ -213,20 +215,21 @@ def run_segmentation_stage(img_paths, pseudo_masks, device, config):
 
 
 def main_runner(config):
+    set_seed(config["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nUsing device: {device}")
+    print(f"Using device: {device}")
     print(f"Image size: {config['image_size']}×{config['image_size']}")
 
     print("CLASSIFIER TRAINING")
-    classifier, val_loader = run_classifier_stage(device, config)
-
+    classifier, val_loader = run_classifier(device, config)
+    
     print("OPTIMAL CONFIDENCE THRESHOLD BASED ON F1 SCORE from VAL SET")
-    optimal_confidence = find_confidence_threshold(
+    optimal_confidence = find_confidence_thresh(
         model=classifier, loader=val_loader, device=device
     )
 
     config["confidence_threshold"] = optimal_confidence
-
+    
     print("PSEUDO-LABEL GENERATION")
 
     img_dir = config["root_dir"] / "train" / "images" / "*.jpg"
@@ -241,12 +244,12 @@ def main_runner(config):
 
 
     print("SEGMENTATION TRAINING")
-    seg_model, train_loader = run_segmentation_stage(
+    seg_model, train_loader = run_segmentation(
         all_img_paths, pseudo_masks, device, config
     )
 
     print("OTSU THRESHOLD SELECTION")
-    best_thresh = find_threshold_otsu(seg_model, train_loader, device, max_samples=1000)
+    best_thresh = find_otsu_thresh(seg_model, train_loader, device, max_samples=1000)
 
 
     # Test phase
@@ -266,9 +269,9 @@ def main_runner(config):
     )
 
     print("Final Configuration:")
-    print(f"  Confidence Threshold: {config['confidence_threshold']:.4f}")
-    print(f"  CAM Percentile:       {config['cam_percentile']}")
-    print(f"  Seg Threshold:        {best_thresh:.4f}")
+    print(f"Confidence Threshold: {config['confidence_threshold']:.4f}")
+    print(f"CAM Percentile:       {config['cam_percentile']}")
+    print(f"Seg Threshold:        {best_thresh:.4f}")
 
 
 if __name__ == "__main__":
