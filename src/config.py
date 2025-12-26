@@ -12,7 +12,7 @@ CONFIG = {
     "batch_size": 2, 
     "batch_size1": 16,
     "val_split": 0.15,
-    "seed": 42,
+    "seed": 1,
     "num_workers": 2,
 
     # Augmentations
