@@ -14,7 +14,6 @@ from src.models import GradCAMPlusPlus, UNetLight, generate_pseudo_labels
 from src.datasets import ImageDataset, classifier_dataloader
 from src.threshold_selection import find_otsu_thresh, find_confidence_thresh
 from src.test import run_evaluation
-from src.utils import set_seed
 
 def train_classifier(
     model, train_loader, val_loader, optimizer, criterion, device, epochs, save_path
@@ -215,7 +214,6 @@ def run_segmentation(img_paths, pseudo_masks, device, config):
 
 
 def main_runner(config):
-    set_seed(config["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Image size: {config['image_size']}×{config['image_size']}")

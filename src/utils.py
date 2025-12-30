@@ -7,13 +7,6 @@ import random
 import numpy as np
 
 
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
 def get_transforms(config, mode="train"):
     """
     Returns transforms based on config and mode ('train' or 'val').
