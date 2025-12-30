@@ -9,8 +9,8 @@ CONFIG = {
     "image_size": 448,
     
     # Data Config
-    "batch_size": 2, 
-    "batch_size1": 16,
+    "batch_size": 4, 
+    "batch_size1": 32,
     "val_split": 0.15,
     "seed": 42,
     "num_workers": 2,
