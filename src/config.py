@@ -21,7 +21,7 @@ CONFIG = {
     "use_oversampling": True,
 
     # Training Hyperparameters
-    "classifier_epochs": 1,
+    "classifier_epochs": 2,
     "seg_epochs": 5,
     "lr_classifier": 1e-4,
     "lr_seg": 1e-3,
