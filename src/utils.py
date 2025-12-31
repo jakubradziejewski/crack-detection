@@ -3,7 +3,6 @@ import numpy as np
 import torch
 from torch.utils.data import WeightedRandomSampler
 from torchvision import transforms
-import random
 import numpy as np
 
 
@@ -64,15 +63,6 @@ def mask2rle(img):
     runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
     runs[1::2] -= runs[::2]
     return ' '.join(str(x) for x in runs)
-
-# For debugging purposes, running test.py standalone
-def load_model(model, path, device):
-    """Load model weights from checkpoint."""
-    from pathlib import Path
-    if Path(path).exists():
-        model.load_state_dict(torch.load(path, map_location=device))
-    else:
-        print(f"Warning: Model path {path} not found.")
 
 def calculate_iou(pred_mask, true_mask):
     intersection = np.logical_and(pred_mask, true_mask).sum()

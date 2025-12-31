@@ -4,7 +4,7 @@ import kagglehub
 from config import CONFIG
 
 def setup_dataset():
-    # 1. Use the directory from your central config
+    # Use the directory from config
     local_data_dir = CONFIG["root_dir"] 
     
     # Download source from Kaggle
@@ -17,7 +17,7 @@ def setup_dataset():
         os.makedirs(local_data_dir)
         print(f"Created directory: {local_data_dir}")
 
-    # 2. Move folders to the location specified in CONFIG
+    # Move folders to the location from config
     for folder in ['train', 'test']:
         source = os.path.join(true_source_dir, folder)
         destination = os.path.join(local_data_dir, folder)
@@ -28,7 +28,6 @@ def setup_dataset():
         else:
             print(f"Folder {folder} already exists in destination, skipping move.")
 
-    # Clean up Kaggle cache
     try:
         shutil.rmtree(download_path)
         print("Kaggle cache cleared.")

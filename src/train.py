@@ -240,7 +240,6 @@ def main_runner(config):
         classifier, all_img_paths, device, config, use_multiscale=True
     )
 
-
     print("SEGMENTATION TRAINING")
     seg_model, train_loader = run_segmentation(
         all_img_paths, pseudo_masks, device, config
