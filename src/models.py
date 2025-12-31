@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet34, ResNet34_Weights
 from torchvision import transforms
 import numpy as np
 import cv2
@@ -13,11 +13,11 @@ class GradCAMPlusPlus(nn.Module):
     def __init__(self):
         super().__init__()
         
-        # === SWITCHED TO RESNET-18 ===
-        # This is the lightest ResNet model (~11M params).
-        # We load standard ImageNet weights.
-        weights = ResNet18_Weights.IMAGENET1K_V1
-        backbone = resnet18(weights=weights)
+        # === SWITCHED TO RESNET-34 ===
+        # ResNet-34 is deeper than ResNet-18 but uses the same BasicBlock structure.
+        # This makes it compatible with our manual dilation patch.
+        weights = ResNet34_Weights.IMAGENET1K_V1
+        backbone = resnet34(weights=weights)
         
         # Split backbone
         self.conv1 = backbone.conv1
@@ -31,8 +31,8 @@ class GradCAMPlusPlus(nn.Module):
         self.layer4 = backbone.layer4
         
         # === MANUAL DILATION PATCH ===
-        # ResNet-18 uses 'BasicBlock', which doesn't support 'replace_stride_with_dilation'.
-        # We manually patch Layer 3 and Layer 4 to stop downsampling.
+        # ResNet-34 uses 'BasicBlock', so we must manually patch it 
+        # just like we did for ResNet-18.
         
         # Layer 3: Output 28x28 (Stride 1, Dilation 2)
         self._modify_layer(self.layer3, dilation=2)
@@ -41,7 +41,7 @@ class GradCAMPlusPlus(nn.Module):
         self._modify_layer(self.layer4, dilation=4)
         
         self.gap = nn.AdaptiveAvgPool2d(1)
-        # ResNet-18 outputs 512 channels (same as ResNet-34)
+        # ResNet-34 outputs 512 channels (same as ResNet-18)
         self.classifier = nn.Linear(512, 2)
         
         self.gradients = {}
@@ -50,7 +50,7 @@ class GradCAMPlusPlus(nn.Module):
     def _modify_layer(self, layer, dilation):
         """
         Manually change stride to 1 and increase dilation for all Conv2d layers.
-        This forces the layer to maintain high resolution.
+        Works for both ResNet-18 and ResNet-34 (BasicBlock architectures).
         """
         for module in layer.modules():
             if isinstance(module, nn.Conv2d):
@@ -62,7 +62,6 @@ class GradCAMPlusPlus(nn.Module):
                 module.dilation = (dilation, dilation)
                 
                 # Adjust padding to match dilation so image size stays constant
-                # (kernel_size//2) * dilation
                 if module.kernel_size == (3, 3):
                     module.padding = (dilation, dilation)
 
@@ -209,7 +208,8 @@ def generate_pseudo_labels(model, img_paths, device, config, use_multiscale=True
                     cam_norm = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
                     cams[layer_name] = cam_norm
             
-            # Weighted average for ResNet-18
+            # Weighted average for ResNet-34
+            # We keep high weights on layer 3/4 as they have better semantic understanding of cracks
             fused_cam = (0.2 * cams['layer2'] + 0.4 * cams['layer3'] + 0.4 * cams['layer4'])
             cam_final = fused_cam
         else:

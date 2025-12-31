@@ -142,12 +142,14 @@ def train_segmentation(
 
 
 def run_classifier(device, config):
+    # Get dataloaders (includes split, augmentation, sampling)
     train_loader, val_loader = classifier_dataloader(config)
 
     model = GradCAMPlusPlus()
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr_classifier"])
     criterion = nn.CrossEntropyLoss()
 
+    # Train with validation monitoring
     model = train_classifier(
         model,
         train_loader,
@@ -167,6 +169,7 @@ def run_segmentation(img_paths, pseudo_masks, device, config):
 
     print(f"Training on all {len(img_paths)} images with pseudo-masks")
 
+    # Create transform
     transform = transforms.Compose(
         [
             transforms.Resize((img_size, img_size)),
@@ -175,6 +178,7 @@ def run_segmentation(img_paths, pseudo_masks, device, config):
         ]
     )
 
+    # Create dataset using SimpleImageDataset with segmentation flag
     train_dataset = ImageDataset(
         paths=img_paths, 
         labels=pseudo_masks, 
@@ -189,10 +193,12 @@ def run_segmentation(img_paths, pseudo_masks, device, config):
         num_workers=config["num_workers"],
     )
 
+    # Initialize model
     model = UNetLight()
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr_seg"])
     criterion = nn.BCELoss()
 
+    # Train (no validation)
     model = train_segmentation(
         model=model,
         train_loader=train_loader,
@@ -203,6 +209,7 @@ def run_segmentation(img_paths, pseudo_masks, device, config):
         save_path=config["seg_model_path"],
     )
 
+    # Return model and loader for threshold selection
     return model, train_loader
 
 
@@ -233,6 +240,7 @@ def main_runner(config):
         classifier, all_img_paths, device, config, use_multiscale=True
     )
 
+
     print("SEGMENTATION TRAINING")
     seg_model, train_loader = run_segmentation(
         all_img_paths, pseudo_masks, device, config
@@ -240,6 +248,7 @@ def main_runner(config):
 
     print("OTSU THRESHOLD SELECTION")
     best_thresh = find_otsu_thresh(seg_model, train_loader, device, max_samples=1000)
+
 
     # Test phase
     classifier.eval()
